@@ -1,0 +1,4 @@
+﻿time,risk,queue_length,reroute
+10:00,Amber,2,False
+10:10,Red,4,True
+10:20,Red,5,True

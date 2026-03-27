@@ -52,7 +52,6 @@ class UGVAgent(mesa.Agent):
 
         self.battery -= actual_consume
 
-
 # =========================
 # 2. 모델
 # =========================
@@ -130,7 +129,6 @@ class UGVModel(mesa.Model):
         self.schedule.step()
         self.steps += 1
         self.datacollector.collect(self)
-
 
 # =========================
 # 3. 🔥 핵심: 외부 호출 함수

@@ -1,8 +1,7 @@
-
-"""Application settings."""
+## 설정, 공통 로직
+## Application settings
 
 import os
-
 
 class Settings:
     app_name: str = os.getenv("APP_NAME", "FiveWeather Backend")
@@ -10,6 +9,5 @@ class Settings:
         "DATABASE_URL",
         "postgresql+psycopg://postgres:postgres@localhost:5432/fiveweather",
     )
-
 
 settings = Settings()

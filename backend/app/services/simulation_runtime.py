@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import asyncio
 import contextlib
 import random
@@ -7,9 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
-
 from app.schemas.simulation_schema import SimulationStartRequest
-
 
 UNIT_COLORS = {
     "1제대": "#dc2626",
@@ -17,14 +14,11 @@ UNIT_COLORS = {
     "3제대": "#2563eb",
 }
 
-
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
 def _clone_grid(rows: int, cols: int, fill: int = 0) -> list[list[int]]:
     return [[fill for _ in range(cols)] for _ in range(rows)]
-
 
 def generate_terrain_grid(rows: int, cols: int) -> list[list[int]]:
     grid = _clone_grid(rows, cols)
@@ -43,7 +37,6 @@ def generate_terrain_grid(rows: int, cols: int) -> list[list[int]]:
             ):
                 grid[r][c] = 3
     return grid
-
 
 def generate_layer_grids(rows: int, cols: int) -> dict[str, list[list[int]]]:
     rain = _clone_grid(rows, cols)
@@ -72,7 +65,6 @@ def generate_layer_grids(rows: int, cols: int) -> dict[str, list[list[int]]]:
                 risk[r][c] = max(risk[r][c], 1)
     return {"rain": rain, "visibility": visibility, "soil": soil, "risk": risk}
 
-
 def build_unit_paths(rows: int, cols: int) -> dict[str, list[tuple[int, int]]]:
     last_r = rows - 1
     last_c = cols - 1
@@ -81,7 +73,6 @@ def build_unit_paths(rows: int, cols: int) -> dict[str, list[tuple[int, int]]]:
         "2제대": [(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (3, 2), (4, 2), (5, 3), (6, 4), (7, 5), (8, 6)],
         "3제대": [(0, 0), (1, 0), (2, 1), (3, 2), (4, 3), (5, 4), (6, 6), (7, 8), (7, 10), (7, 12), (min(9,last_r), min(14,last_c)), (last_r, last_c)],
     }
-
 
 def make_units(rows: int, cols: int, ugv_count: int) -> list[dict[str, Any]]:
     paths = build_unit_paths(rows, cols)
@@ -147,7 +138,6 @@ def make_units(rows: int, cols: int, ugv_count: int) -> list[dict[str, Any]]:
         idx += 1
     return base_units
 
-
 def _queue_schedule(units: list[dict[str, Any]]) -> list[dict[str, str]]:
     rows = []
     for unit in units:
@@ -160,7 +150,6 @@ def _queue_schedule(units: list[dict[str, Any]]) -> list[dict[str, str]]:
             })
     return rows[:3]
 
-
 def _mission_time_rows(units: list[dict[str, Any]]) -> list[dict[str, str]]:
     rows = []
     for idx, unit in enumerate(units, start=1):
@@ -171,7 +160,6 @@ def _mission_time_rows(units: list[dict[str, Any]]) -> list[dict[str, str]]:
             "remaining": f"{max(6, 26 - idx * 4)}분",
         })
     return rows
-
 
 @dataclass
 class SimulationRun:
@@ -280,7 +268,6 @@ class SimulationRun:
                 },
             )
 
-
 class SimulationManager:
     def __init__(self) -> None:
         self.runs: dict[str, SimulationRun] = {}
@@ -350,6 +337,5 @@ class SimulationManager:
                 run.task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await run.task
-
 
 simulation_manager = SimulationManager()

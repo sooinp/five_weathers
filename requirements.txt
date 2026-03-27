@@ -16,6 +16,10 @@ numpy==1.26.4
 pandas==2.2.2
 requests==2.31.0
 
+<database>
+SQLAlchemy==2.0.39
+psycopg[binary]==3.2.6
+
 ##----------------------------
 # 만약 하나의 가상환경에서 모두 관리하신다면 루트 폴더에서 다음 통합 명령어를 사용하세요.
 
@@ -23,6 +27,3 @@ requests==2.31.0
 #           networkx==2.8.8 numpy==1.26.4 pandas==2.2.2 matplotlib==3.8.2 \
 #           pydantic==2.6.1 httpx==0.26.0 requests==2.31.0
 ##----------------------------
-# <database>
-SQLAlchemy==2.0.39
-psycopg[binary]==3.2.6

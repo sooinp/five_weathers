@@ -1,8 +1,8 @@
-from __future__ import annotations
+## 데이터 구조 정의 (Pydantic)
 
+from __future__ import annotations
 from typing import Any, Literal
 from pydantic import BaseModel, Field
-
 
 class SimulationStartRequest(BaseModel):
     rows: int = Field(default=12, ge=4, le=50)
@@ -14,10 +14,8 @@ class SimulationStartRequest(BaseModel):
     destination: str = "AOI-END"
     step_interval_sec: float = Field(default=1.0, ge=0.2, le=10.0)
 
-
 class SimulationCommandRequest(BaseModel):
     action: Literal["pause", "resume", "stop", "tick"]
-
 
 class ApiEnvelope(BaseModel):
     ok: bool = True

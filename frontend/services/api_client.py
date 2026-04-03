@@ -17,6 +17,7 @@ import pandas as pd
 import requests
 import solara
 import websockets
+from typing import Any
 
 # =========================
 # 백엔드 연결 설정
@@ -44,47 +45,95 @@ _ws_thread: threading.Thread | None = None
 # =========================
 # 임시 사용자 저장소
 # =========================
-users = solara.reactive({
-    "admin": {
-        "password": "1234",
-        "name": "관리자",
-        "email": "admin@test.com",
-        "role": "분석관",
-    }
-})
+USER_DB = {"user1": "user1", "user2": "user2", "user3": "user3"}
+NICKNAMES = {"user1": "1제대", "user2": "2제대", "user3": "3제대"}
+UGV_ICONS = {1: "①", 2: "②", 3: "③", 4: "④"}
 
-# 로그인 입력값
-login_id = solara.reactive("")
-login_password = solara.reactive("")
+is_logged_in = solara.reactive(False)
+input_username = solara.reactive("")
+input_password = solara.reactive("")
+login_error = solara.reactive(False)
+logged_in_user = solara.reactive("")
 
-# 회원가입 입력값
-signup_name = solara.reactive("")
-signup_id = solara.reactive("")
-signup_password = solara.reactive("")
-signup_email = solara.reactive("")
+active_btn = solara.reactive("")
+map_selection = solara.reactive("위험도")
 
-# 마이페이지 수정 입력값
-edit_name = solara.reactive("")
-edit_email = solara.reactive("")
+success_rate = solara.reactive(78)
+asset_damage = solara.reactive(13)
+status = solara.reactive("진행중")
+time_left = solara.reactive("00:12:34")
+ratio_x = solara.reactive(3)
 
-# 시나리오 입력값 예시
-# 현재는 좌측 패널에서 보여주는 기본 파라미터 -> 입력 폼과 연결 필요
-ugv_count = solara.reactive(6)
-controller_count = solara.reactive(2)
-risk_sensitivity = solara.reactive("중간")
-departure = solara.reactive("AOI-START")
-destination = solara.reactive("AOI-END")
+effect_success = solara.reactive(12)
+effect_damage = solara.reactive(-7)
 
-# KPI(그리드 맵 하단부)
-current_route_label = solara.reactive("현재경로 A-01")
-mission_status = solara.reactive("대기")
-mission_success_rate = solara.reactive(0)
-estimated_cost = solara.reactive(0)
-alternative_route = solara.reactive({"name": "차선책 경로 B-02", "success_rate": 0, "cost": 0, "reason": "시뮬레이션 실행 후 표시됩니다."})
-mission_time_rows = solara.reactive([])
-queue_schedule = solara.reactive([])
-selected_unit_id = solara.reactive(None)
-selected_detail = solara.reactive(None)
+queue_data = solara.reactive([
+    {"id": "UGV-2", "dist": "12m"},
+    {"id": "UGV-1", "dist": "7m"},
+])
+
+
+
+def attempt_login():
+    u = input_username.value
+    p = input_password.value
+    if u in USER_DB and USER_DB[u] == p:
+        logged_in_user.set(u)
+        is_logged_in.set(True)
+        login_error.set(False)
+    else:
+        login_error.set(True)
+
+
+def go_home():
+    is_logged_in.set(False)
+    input_username.set("")
+    input_password.set("")
+    login_error.set(False)
+    logged_in_user.set("")
+    active_btn.set("")
+##============================================ <- 아래는 기존의 내용
+# users = solara.reactive({
+#     "admin": {
+#         "password": "1234",
+#         "name": "관리자",
+#         "email": "admin@test.com",
+#         "role": "분석관",
+#     }
+# })
+
+# # 로그인 입력값
+# login_id = solara.reactive("")
+# login_password = solara.reactive("")
+
+# # 회원가입 입력값
+# signup_name = solara.reactive("")
+# signup_id = solara.reactive("")
+# signup_password = solara.reactive("")
+# signup_email = solara.reactive("")
+
+# # 마이페이지 수정 입력값
+# edit_name = solara.reactive("")
+# edit_email = solara.reactive("")
+
+# # 시나리오 입력값 예시
+# # 현재는 좌측 패널에서 보여주는 기본 파라미터 -> 입력 폼과 연결 필요
+# ugv_count = solara.reactive(6)
+# controller_count = solara.reactive(2)
+# risk_sensitivity = solara.reactive("중간")
+# departure = solara.reactive("AOI-START")
+# destination = solara.reactive("AOI-END")
+
+# # KPI(그리드 맵 하단부)
+# current_route_label = solara.reactive("현재경로 A-01")
+# mission_status = solara.reactive("대기")
+# mission_success_rate = solara.reactive(0)
+# estimated_cost = solara.reactive(0)
+# alternative_route = solara.reactive({"name": "차선책 경로 B-02", "success_rate": 0, "cost": 0, "reason": "시뮬레이션 실행 후 표시됩니다."})
+# mission_time_rows = solara.reactive([])
+# queue_schedule = solara.reactive([])
+# selected_unit_id = solara.reactive(None)
+# selected_detail = solara.reactive(None)
 
 # =========================
 # 그리드 맵 상태
@@ -108,6 +157,12 @@ planned_path = solara.reactive([])
 start_point = solara.reactive((0, 0))
 end_point = solara.reactive((grid_rows.value - 1, grid_cols.value - 1))
 
+units_data = solara.reactive([])
+current_path = solara.reactive([])
+updated_path = solara.reactive([])
+
+replan_available = solara.reactive(False)
+
 # 더미 UGV 위치
 ugv_positions = solara.reactive([])
 units_data = solara.reactive([])
@@ -118,6 +173,12 @@ warning_cards = solara.reactive([])
 
 # 저장용 리포트
 report_data = solara.reactive([])
+
+# run / connection 관련
+run_id = solara.reactive(None)
+backend_connected = solara.reactive(False)
+ws_connected = solara.reactive(False)
+message_text = solara.reactive("")
 
 # =========================
 # 공통 기능
@@ -157,6 +218,16 @@ def get_selected_unit():
         if unit["id"] == uid:
             return unit
     return None
+
+# =========================================================
+# 4. 버튼 상태 제어
+# =========================================================
+def set_active_button(name: str):
+    active_btn.set(name)
+
+
+def set_map_selection(name: str):
+    map_selection.set(name)
 
 # =========================
 # 로그인 / 로그아웃 / 회원가입
@@ -245,7 +316,7 @@ def save_report_csv():
 # =========================
 # 스냅샷(0327 기준 아직 확실하지 않은 기능 - 삭제될 수도 있어서 그냥 놔둬주세요)
 # =========================
-def _apply_snapshot(snapshot: dict):
+def _apply_snapshot(snapshot: dict[str, Any]):
     # snapshot은 백엔드가 화면 전체를 다시 그리기 위해 내려주는 단일 상태 묶음
     grid_rows.value = snapshot.get("rows", grid_rows.value)
     grid_cols.value = snapshot.get("cols", grid_cols.value)
@@ -270,6 +341,33 @@ def _apply_snapshot(snapshot: dict):
     report_data.value = snapshot.get("report_data", [])
     if units_data.value and not selected_unit_id.value:
         selected_unit_id.value = units_data.value[0]["id"]
+
+    terrain_grid.value = snapshot.get("terrain_grid", terrain_grid.value)
+    risk_grid.value = snapshot.get("risk_grid", risk_grid.value)
+    rain_grid.value = snapshot.get("rain_grid", rain_grid.value)
+    visibility_grid.value = snapshot.get("visibility_grid", visibility_grid.value)
+    soil_grid.value = snapshot.get("soil_grid", soil_grid.value)
+    units_data.value = snapshot.get("units_data", units_data.value)
+    current_path.value = snapshot.get("current_path", current_path.value)
+    updated_path.value = snapshot.get("updated_path", updated_path.value)
+
+    selected_unit_id = solara.reactive(None)
+    selected_detail = solara.reactive(None)
+
+    start_point.value = snapshot.get("start_point", start_point.value)
+    end_point.value = snapshot.get("goal_point", end_point.value)
+
+    # 친구 디자인 KPI와 연결
+    success_rate.value = snapshot.get("mission_success_rate", success_rate.value)
+    asset_damage.value = snapshot.get("asset_damage_rate", asset_damage.value)
+    status.value = snapshot.get("mission_status", status.value)
+    time_left.value = snapshot.get("time_left", time_left.value)
+    ratio_x.value = snapshot.get("ratio_x", ratio_x.value)
+
+    effect_success.value = snapshot.get("effect_success", effect_success.value)
+    effect_damage.value = snapshot.get("effect_damage", effect_damage.value)
+    queue_data.value = snapshot.get("queue_data", queue_data.value)
+    replan_available.value = snapshot.get("replan_available", replan_available.value)
 
 
 def _http(method: str, path: str, **kwargs):
@@ -359,6 +457,19 @@ def stop_live_updates():
     _ws_stop_event.clear()
     connection_status.value = "연결 종료"
 
+def request_replan():
+    """
+    경로 재계획 버튼 클릭 시 호출.
+    현재는 UI 상태만 갱신하고,
+    나중에 실제 REST/WebSocket 재계획 요청으로 연결하면 됨.
+    """
+    if not replan_available.value:
+        message_text.value = "현재는 경로 수정이 필요하지 않습니다."
+        return
+
+    message_text.value = "경로 수정 요청 전송"
+    replan_available.value = False
+
 # =========================
 # 통신(웹소켓 연결) 정의
 # =========================
@@ -407,3 +518,17 @@ def _handle_ws_event(event: dict):
         alert = event.get("alert", {})
         message.value = f"[{alert.get('level','INFO')}] {alert.get('message','새 경보') }"
 
+def on_ws_message(data: dict[str, Any]):
+    """
+    기존 ws 수신부가 있다면,
+    이벤트 타입을 보고 _apply_snapshot 호출하도록 연결.
+    """
+    event_type = data.get("type")
+
+    if event_type == "snapshot":
+        _apply_snapshot(data.get("payload", {}))
+    elif event_type == "state_changed":
+        payload = data.get("payload", {})
+        status.value = payload.get("mission_status", status.value)
+    elif event_type == "message":
+        message_text.value = data.get("payload", {}).get("text", message_text.value)

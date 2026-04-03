@@ -95,3 +95,31 @@ def DetailOverlay(detail: dict, unit: dict):
             solara.Text(f"지형: {sos['terrain']}")
             solara.Text(f"위험도: {sos['risk']}")
             solara.Text(sos['note'])
+
+@solara.component
+def LtwrMapPanel():
+    with solara.Column(classes=["right-sidebar-area"], style={"padding-top": "18px"}):
+        solara.Text(
+            "LTWR 현황",
+            style={"color": "#94a3b8", "font-weight": "bold", "margin-bottom": "20px", "margin-top": "4px"},
+        )
+
+        for step in ["T (현재)", "T + 1h", "T + 2h", "T + 3h"]:
+            with solara.Column(style={"margin-bottom": "15px"}):
+                solara.Text(
+                    step,
+                    style={"color": "#94a3b8", "font-weight": "600", "font-size": "15px", "margin-bottom": "5px", "padding-left": "2px"},
+                )
+                with solara.Div(
+                    style={
+                        "width": "100%",
+                        "height": "200px",
+                        "background-color": "#0f172a",
+                        "border": "1px solid #1e293b",
+                        "border-radius": "6px",
+                        "display": "flex",
+                        "align-items": "center",
+                        "justify-content": "center",
+                    }
+                ):
+                    solara.Text("MAP AREA", style={"color": "#334155", "font-size": "12px"})

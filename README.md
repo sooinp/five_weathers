@@ -58,7 +58,7 @@ copy .env.example .env          # Windows
 | `DATABASE_URL` | Docker DB 연결 주소 | `postgresql+asyncpg://postgres:password@db:5432/hanhwa` |
 | `JWT_SECRET_KEY` | JWT 서명 키 (아무 긴 문자열) | `supersecretkey1234567890abcdef12` |
 | `ADMIN_USERNAME` | 초기 관리자 아이디 | `admin` |
-| `ADMIN_PASSWORD` | 초기 관리자 비밀번호 | `admin123` |
+| `ADMIN_PASSWORD` | 초기 관리자 비밀번호 | `admin` |
 
 > `DATABASE_URL`의 호스트는 `localhost`가 아닌 `db`로 설정해야 합니다 (Docker 내부 네트워크).
 

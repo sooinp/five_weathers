@@ -1,0 +1,42 @@
+# ── 환경 변수 / 비밀 정보 ────────────────────────────────
+.env
+*.env
+!*.env.example
+
+# ── Python 캐시 / 가상환경 ───────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# ── 빌드 / 배포 산출물 ───────────────────────────────────
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# ── 테스트 / 커버리지 ─────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── 로그 ─────────────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.code-workspace
+
+# ── 임시/로컬 패치 스크립트 (루트에 남은 잔여물) ─────────────
+auth_integration_patch.py
+auth_router.py
+security.py
+load_grid.py
+load_weather.py
+seed_scenarios.py

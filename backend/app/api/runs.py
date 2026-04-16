@@ -1,43 +1,71 @@
-## 0331 기준 DB용 라우터 모음
+"""
+backend/app/api/runs.py
 
-from __future__ import annotations
-from fastapi import APIRouter, Depends
-from sqlalchemy import text
-from sqlalchemy.orm import Session
-from app.db.session import get_db
-from app.schemas.simulation_schema import SimulationRunCreate
+시뮬레이션 실행 관리.
 
-router = APIRouter(prefix="/runs", tags=["runs"])
+POST /api/missions/{mission_id}/runs   — run 생성
+GET  /api/runs/{run_id}                — run 조회
+POST /api/runs/{run_id}/start          — run 시작
+POST /api/runs/{run_id}/cancel         — run 취소
+"""
 
-@router.get("/")
-def list_runs(db: Session = Depends(get_db)):
-    rows = db.execute(
-        text("""
-            SELECT run_id, mission_name, status, total_ugv_count, total_operator_count,
-                   unit_count, created_at
-            FROM simulation_run
-            ORDER BY run_id DESC
-        """)
-    ).mappings().all()
-    return [dict(row) for row in rows]
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
-@router.post("/")
-def create_run(payload: SimulationRunCreate, db: Session = Depends(get_db)):
-    row = db.execute(
-        text("""
-            INSERT INTO simulation_run (
-                mission_name, status, total_ugv_count, total_operator_count,
-                unit_count, created_at
-            )
-            VALUES (
-                :mission_name, 'created', :total_ugv_count, :total_operator_count,
-                :unit_count, NOW()
-            )
-            RETURNING run_id, mission_name, status, total_ugv_count,
-                      total_operator_count, unit_count, created_at
-        """),
-        payload.model_dump(),
-    ).mappings().first()
+from app.api.deps import CurrentUser, DBSession, require_roles
+from app.db.schemas.simulation import RunOut
+from app.services.simulation_service import SimulationService
 
-    db.commit()
-    return dict(row)
+router = APIRouter(tags=["runs"])
+
+
+@router.post(
+    "/missions/{mission_id}/runs",
+    response_model=RunOut,
+    status_code=201,
+    summary="시뮬레이션 run 생성",
+)
+async def create_run(mission_id: int, db: DBSession, user: CurrentUser):
+    svc = SimulationService(db)
+    run = await svc.create_run(mission_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="임무를 찾을 수 없습니다.")
+    return run
+
+
+@router.get("/runs/{run_id}", response_model=RunOut, summary="run 조회")
+async def get_run(run_id: int, db: DBSession, user: CurrentUser):
+    svc = SimulationService(db)
+    run = await svc.get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run을 찾을 수 없습니다.")
+    return run
+
+
+@router.post(
+    "/runs/{run_id}/start",
+    response_model=RunOut,
+    summary="run 시작",
+    dependencies=[Depends(require_roles("commander"))],
+)
+async def start_run(
+    run_id: int, db: DBSession, user: CurrentUser, background_tasks: BackgroundTasks
+):
+    svc = SimulationService(db)
+    run = await svc.start_run(run_id, background_tasks)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run을 찾을 수 없습니다.")
+    return run
+
+
+@router.post(
+    "/runs/{run_id}/cancel",
+    response_model=RunOut,
+    summary="run 취소",
+    dependencies=[Depends(require_roles("commander"))],
+)
+async def cancel_run(run_id: int, db: DBSession, user: CurrentUser):
+    svc = SimulationService(db)
+    run = await svc.cancel_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run을 찾을 수 없습니다.")
+    return run

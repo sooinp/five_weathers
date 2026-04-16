@@ -1,23 +1,31 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+"""
+backend/app/db/session.py
+
+AsyncSession 팩토리 + FastAPI 의존성 제공.
+asyncpg 드라이버 사용 (DATABASE_URL = postgresql+asyncpg://...).
+"""
+
+from collections.abc import AsyncGenerator
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
 from app.core.config import settings
 
-engine = create_engine(
+engine = create_async_engine(
     settings.database_url,
-    pool_pre_ping=True,
-    future=True,
+    echo=False,
+    pool_size=10,
+    max_overflow=20,
 )
 
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
+AsyncSessionLocal = async_sessionmaker(
     bind=engine,
-    future=True,
+    expire_on_commit=False,
+    class_=AsyncSession,
 )
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI 엔드포인트 DB 세션 의존성."""
+    async with AsyncSessionLocal() as session:
+        yield session

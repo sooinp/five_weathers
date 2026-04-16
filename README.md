@@ -93,8 +93,8 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # Mac/Linux
 
-pip install -r requirements.txt
-pip install "uvicorn==0.29.0"   # solara 호환 버전 고정
+pip install -r requirements.txt    ## 한 번 다운로드 하면 재실행 필요 X
+pip install "uvicorn==0.29.0"   # solara 호환 버전 고정 ## 한 번 다운로드 하면 재실행 필요 X
 
 solara run app.py
 ```

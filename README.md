@@ -39,58 +39,67 @@ claude/
 
 ### 사전 요구사항
 - Python 3.11+
-- PostgreSQL 16 실행 중
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (백엔드 + DB 실행용)
 
-### 1. 백엔드
+---
+
+### 1. 환경변수 설정
 
 ```bash
 cd backend
-
-# 가상환경 생성 및 패키지 설치
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Mac/Linux
-
-pip install -r requirements.txt
-
-# 환경변수 설정
 copy .env.example .env          # Windows
 # cp .env.example .env          # Mac/Linux
-# .env 파일 열어서 실제 값 입력
+```
 
-# 서버 실행
-uvicorn app.main:app --reload
+`.env` 파일을 열어서 아래 항목 수정:
+
+| 변수명 | 설명 | 예시 |
+|--------|------|------|
+| `DATABASE_URL` | Docker DB 연결 주소 | `postgresql+asyncpg://postgres:password@db:5432/hanhwa` |
+| `JWT_SECRET_KEY` | JWT 서명 키 (아무 긴 문자열) | `supersecretkey1234567890abcdef12` |
+| `ADMIN_USERNAME` | 초기 관리자 아이디 | `admin` |
+| `ADMIN_PASSWORD` | 초기 관리자 비밀번호 | `admin123` |
+
+> `DATABASE_URL`의 호스트는 `localhost`가 아닌 `db`로 설정해야 합니다 (Docker 내부 네트워크).
+
+---
+
+### 2. 백엔드 + DB (Docker)
+
+Docker Desktop을 실행한 뒤:
+
+```bash
+cd backend
+docker compose up -d --build
+```
+
+정상 실행 확인:
+```bash
+docker compose ps
+# hanhwa_db, hanhwa_backend 모두 running 상태여야 함
 ```
 
 백엔드 주소: http://localhost:8000  
 API 문서: http://localhost:8000/docs
 
-### 2. 프론트엔드
+---
+
+### 3. 프론트엔드
 
 ```bash
 cd frontend
 
 python -m venv .venv
-.venv\Scripts\activate
-pip install solara starlette==0.45.3 ipyleaflet ipywidgets websocket-client
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Mac/Linux
+
+pip install -r requirements.txt
+pip install "uvicorn==0.29.0"   # solara 호환 버전 고정
 
 solara run app.py
 ```
 
 프론트엔드 주소: http://localhost:8765
-
----
-
-## 환경변수 설정
-
-`backend/.env.example`을 `backend/.env`로 복사 후 아래 항목 필수 입력:
-
-| 변수명 | 설명 | 예시 |
-|--------|------|------|
-| `DATABASE_URL` | PostgreSQL 연결 주소 | `postgresql+asyncpg://postgres:pass@localhost:5432/fiveweathersDB` |
-| `JWT_SECRET_KEY` | JWT 서명 키 (충분히 긴 랜덤 값) | `openssl rand -hex 32` 결과 |
-| `ADMIN_USERNAME` | 초기 관리자 아이디 | `user1` |
-| `ADMIN_PASSWORD` | 초기 관리자 비밀번호 | `user1` |
 
 ---
 
@@ -100,8 +109,7 @@ solara run app.py
 
 ```bash
 cd backend
-.venv\Scripts\activate
-python create_admin.py --username user1 --password user1
+docker compose exec backend python create_admin.py --username admin --password admin123
 ```
 
 ---
@@ -115,15 +123,6 @@ python create_admin.py --username user1 --password user1
 
 현재는 **Mock 모드**로 동작합니다.  
 `orchestrator.py`의 `run_simulation()` 함수에서 `dummy_runner` → 실 어댑터로 교체하면 Real 모드 전환 가능.
-
----
-
-## Docker로 실행 (백엔드 + DB)
-
-```bash
-cd backend
-docker compose up -d
-```
 
 ---
 

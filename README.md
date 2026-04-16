@@ -109,7 +109,7 @@ solara run app.py
 
 ```bash
 cd backend
-docker compose exec backend python create_admin.py --username admin --password admin123
+docker compose exec backend python create_admin.py --username admin --password admin
 ```
 
 ---

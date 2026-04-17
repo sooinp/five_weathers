@@ -21,8 +21,9 @@ import solara
 import websocket  # websocket-client 라이브러리
 
 import state
+from components.state import remaining_time_text_global, timer_running
 
-BACKEND_WS_URL = os.getenv("BACKEND_WS_URL", "ws://localhost:8000")
+BACKEND_WS_URL = os.getenv("BACKEND_WS_URL", "ws://127.0.0.1:8000")
 
 _ws_app: websocket.WebSocketApp | None = None
 _ws_thread: threading.Thread | None = None
@@ -55,7 +56,11 @@ def _apply_ws_message(msg: dict) -> None:
         if msg.get("status"):
             _ac.status.set(_STATUS_LABEL.get(msg["status"], msg["status"]))
         if msg.get("remaining_time_hms"):
-            _ac.time_left.set(msg["remaining_time_hms"])
+            remaining_hms = msg["remaining_time_hms"]
+            if not timer_running.value:
+                _ac.time_left.set(remaining_hms)
+                _ac.home_remaining_time.set(remaining_hms)
+                remaining_time_text_global.set(remaining_hms)
         if msg.get("aoi_remaining_hms"):
             _ac.patrol_area.set(msg["aoi_remaining_hms"])
 

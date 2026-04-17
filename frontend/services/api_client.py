@@ -26,12 +26,13 @@ from typing import Any
 
 import requests
 import solara
+from components.state import remaining_time_text_global, timer_remaining_secs, timer_running
 
 # =========================================================
 # 백엔드 연결 설정
 # =========================================================
-BACKEND_HTTP_BASE = os.getenv("BACKEND_URL", "http://127.0.0.1:8001")
-BACKEND_WS_BASE   = os.getenv("BACKEND_WS_URL", "ws://127.0.0.1:8001")
+BACKEND_HTTP_BASE = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+BACKEND_WS_BASE   = os.getenv("BACKEND_WS_URL", "ws://127.0.0.1:8000")
 
 # =========================================================
 # 공통 UI 상태
@@ -137,8 +138,11 @@ recon_time = solara.reactive("00:30:00")
 
 # ── 상단 제어 버튼 상태 ──────────────────────────────────
 active_btn      = solara.reactive("실행")
-map_selection   = solara.reactive("위험도")
+map_selection   = solara.reactive("종합상황도")
 replan_available = solara.reactive(False)
+
+# ── 임무 모드 (균형 | 정찰 | 신속) ── 실행/종료 버튼과 분리 ──────
+mission_mode = solara.reactive("균형")
 
 # ── 상세 패널 상태 ────────────────────────────────────────
 selected_unit_id = solara.reactive(None)
@@ -266,14 +270,12 @@ def refresh_home_summary() -> None:
     home_role.set(data.get("role", "commander"))
     home_role_label.set(data.get("role_label", "지휘관"))
     home_current_time.set(data.get("current_time", ""))
-    home_remaining_time.set(data.get("remaining_time", "02:00:34"))
+    remaining_hms = data.get("remaining_time", "02:00:34")
+    sync_remaining_time_text(remaining_hms)
     home_mission_notice.set(data.get("mission_notice") or "")
     home_unit_label.set(data.get("unit_label") or "")
     home_asset_modes.set(data.get("asset_modes", []))
     selected_asset_mode.set(data.get("selected_mode", "balanced"))
-
-    # 기존 UI 변수와도 동기화
-    time_left.set(data.get("remaining_time", "02:00:34"))
 
     # 통제관일 때 좌측 카드 이름도 같이 맞춤
     if data.get("role") == "operator" and data.get("unit_label"):
@@ -380,6 +382,8 @@ def go_home() -> None:
     login_error.set(False)
     logged_in_user.set("")
     active_btn.set("실행")
+    from components.state import stop_mission_timer
+    stop_mission_timer()
     auth_token.set("")
     refresh_token.set("")
     current_page.set("login")
@@ -428,20 +432,24 @@ def _lerp_route(coords: list, progress: float) -> tuple[float, float]:
     return (c1[1] + (c2[1] - c1[1]) * f, c1[0] + (c2[0] - c1[0]) * f)
 
 
+def sync_remaining_time_text(remaining_hms: str, *, force: bool = False) -> None:
+    if timer_running.value and not force:
+        return
+    time_left.set(remaining_hms)
+    home_remaining_time.set(remaining_hms)
+    remaining_time_text_global.set(remaining_hms)
+
+
 def _movement_loop(total_sec: int) -> None:
     import state as _state
-    REAL_SEC_PER_STEP = 3.0   # 실제 3초 = 시뮬 10분
-    SIM_SEC_PER_STEP  = 600   # 10분
 
-    remaining = total_sec
-    while not _movement_stop.is_set() and remaining > 0:
-        _time_module.sleep(REAL_SEC_PER_STEP)
+    while not _movement_stop.is_set():
+        _time_module.sleep(0.5)
         if _movement_stop.is_set():
             break
-        remaining = max(0, remaining - SIM_SEC_PER_STEP)
-        time_left.set(_fmt_hms(remaining))
+        remaining = max(0, timer_remaining_secs.value)
 
-        progress = 1.0 - (remaining / total_sec)
+        progress = 1.0 if total_sec <= 0 else 1.0 - (remaining / total_sec)
         num_ugvs = max(1, int(ratio_x.value))
         new_positions = []
 
@@ -641,7 +649,8 @@ def confirm_route() -> None:
 
         # ETA 기반으로 남은 시간 설정
         eta_min = route.get("eta_min", 60)
-        time_left.set(f"00:{eta_min:02d}:00")
+        eta_hms = f"00:{eta_min:02d}:00"
+        sync_remaining_time_text(eta_hms)
 
         # UGV를 출발지에 배치 (progress=0)
         num_ugvs = max(1, int(input_ugv_count.value))
@@ -757,7 +766,8 @@ def refresh_dashboard(run_id: int) -> None:
             if d.get("status_label"):
                 status.set(d["status_label"])
             if d.get("remaining_time_hms"):
-                time_left.set(d["remaining_time_hms"])
+                remaining_hms = d["remaining_time_hms"]
+                sync_remaining_time_text(remaining_hms)
             if d.get("aoi_remaining_hms"):
                 patrol_area.set(d["aoi_remaining_hms"])
     except Exception:
@@ -830,7 +840,7 @@ def post_operator_mission_config() -> bool:
         }
 
     payload = {
-        "mode": mission_settings.value.get("mode", "균형"),
+        "mode": mission_mode.value,
         "base_assets": {
             "total_units":       int(base.get("total_units", 3)),
             "total_controllers": int(base.get("total_controllers", 3)),

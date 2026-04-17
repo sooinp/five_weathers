@@ -1,5 +1,5 @@
 """
-backend/create_admin.py
+backend/reset_admin_pwd.py
 
 startup seed가 실패했을 때 admin 계정을 직접 생성/복구하는 스크립트.
 

@@ -125,6 +125,7 @@ from app.api import tactical_map  # 신규: 전술 맵 API
 from app.api import operators      # 신규: 통제관 브리핑 API
 from app.api import sim_map        # 신규: 시뮬레이션 결과 HTML 맵
 from app.api import sim_video      # 신규: 시뮬레이션 결과 영상 API
+import app.api.input_map as input_map     # 신규: 작전 지역 입력 맵 API
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(missions.router, prefix="/api")
@@ -137,6 +138,7 @@ app.include_router(tactical_map.router, prefix="/api")  # 신규: /api/runs/{id}
 app.include_router(operators.router, prefix="/api")     # 신규: /api/operators/*
 app.include_router(sim_map.router, prefix="/api")       # 신규: /api/map/sim/*
 app.include_router(sim_video.router, prefix="/api")     # 신규: /api/map/video/*
+app.include_router(input_map.router, prefix="/api")     # 신규: /api/map/input/*
 
 # LTWR HTML 정적 파일 서빙 (/ltwr-maps/T0.html 등)
 _LTWR_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,6 +153,11 @@ app.mount("/sim-maps", StaticFiles(directory=str(_SIM_MAP_DIR)), name="sim-maps"
 _SIM_VIDEO_DIR = Path(__file__).resolve().parents[1] / "data" / "sim_video"
 _SIM_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/sim-videos", StaticFiles(directory=str(_SIM_VIDEO_DIR)), name="sim-videos")
+
+# 입력 맵 정적 HTML 서빙 (/input-map/index.html)
+_INPUT_MAP_DIR = Path(__file__).resolve().parents[1] / "data" / "input_map"
+_INPUT_MAP_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/input-map", StaticFiles(directory=str(_INPUT_MAP_DIR)), name="input-map")
 
 
 # ── 헬스체크 ─────────────────────────────────────────────

@@ -9,7 +9,9 @@ frontend/components/pages.py
 [내 코드]   MainPage, CommanderHomeHeader, OperatorHomeHeader
 """
 
+import asyncio
 import os
+import threading
 import time
 import solara
 from datetime import datetime, timedelta
@@ -17,11 +19,9 @@ from components.grid_view import GridView
 from components.cards import LtwrMapPanel
 from components.map_html_builder import build_base_map_html
 from components.state import (
-    timer_running,
-    timer_end_ts,
     remaining_time_text_global,
-    timer_remaining_secs,
-    video_should_play,
+    start_mission_timer,
+    stop_mission_timer,
 )
 from services.api_client import (
     BACKEND_HTTP_BASE,
@@ -45,7 +45,9 @@ from services.api_client import (
     queue_data,
     message_text,
     is_logged_in,
+    active_mission_id,
     active_run_id,
+    auth_token,
     # ── 팀원 코드: 역할/워크플로우 상태 ─────────────────────
     user_role,
     workflow_step,
@@ -70,6 +72,7 @@ from services.api_client import (
     post_operator_mission_config,
     fetch_operator_briefing,
     unit_kpi_data,
+    mission_mode,
 )
 from components import ws_client
 
@@ -81,18 +84,12 @@ asset_data = solara.reactive({
     "base": {
         "total_units": 3,
         "total_controllers": 3,
-        "total_ugv": 13,
-        "lost_ugv": 1,
+        "total_ugv": 15,   # 5+5+5
+        "lost_ugv": 6,     # 1+2+3
+        "departure_lat": "",
+        "departure_lon": "",
     },
     "user1": {
-        "controllers": 1,
-        "total_ugv": 5,
-        "lost_ugv": 1,
-        "available_ugv": 4,
-        "target_lat": "39.12",
-        "target_lon": "12.45",
-    },
-    "user2": {
         "controllers": 1,
         "total_ugv": 5,
         "lost_ugv": 1,
@@ -100,11 +97,19 @@ asset_data = solara.reactive({
         "target_lat": "",
         "target_lon": "",
     },
+    "user2": {
+        "controllers": 1,
+        "total_ugv": 5,
+        "lost_ugv": 2,
+        "available_ugv": 3,
+        "target_lat": "",
+        "target_lon": "",
+    },
     "user3": {
         "controllers": 1,
         "total_ugv": 5,
-        "lost_ugv": 1,
-        "available_ugv": 4,
+        "lost_ugv": 3,
+        "available_ugv": 2,
         "target_lat": "",
         "target_lon": "",
     },
@@ -162,6 +167,8 @@ def BaseAssetEditor():
     total_controllers, set_total_controllers = solara.use_state("")
     total_ugv, set_total_ugv = solara.use_state("")
     lost_ugv, set_lost_ugv = solara.use_state("")
+    dep_lat, set_dep_lat = solara.use_state("")
+    dep_lon, set_dep_lon = solara.use_state("")
 
     def _sync():
         d = asset_data.value["base"]
@@ -169,6 +176,8 @@ def BaseAssetEditor():
         set_total_controllers(str(d["total_controllers"]))
         set_total_ugv(str(d["total_ugv"]))
         set_lost_ugv(str(d["lost_ugv"]))
+        set_dep_lat(str(d.get("departure_lat", "")))
+        set_dep_lon(str(d.get("departure_lon", "")))
 
     solara.use_effect(_sync, [])
 
@@ -179,6 +188,8 @@ def BaseAssetEditor():
         updated_base["total_controllers"] = total_controllers
         updated_base["total_ugv"] = total_ugv
         updated_base["lost_ugv"] = lost_ugv
+        updated_base["departure_lat"] = dep_lat
+        updated_base["departure_lon"] = dep_lon
         updated["base"] = updated_base
         asset_data.value = updated
 
@@ -188,6 +199,8 @@ def BaseAssetEditor():
         set_total_controllers(str(latest["total_controllers"]))
         set_total_ugv(str(latest["total_ugv"]))
         set_lost_ugv(str(latest["lost_ugv"]))
+        set_dep_lat(str(latest.get("departure_lat", "")))
+        set_dep_lon(str(latest.get("departure_lon", "")))
 
     with solara.Div(classes=["asset-form-card"]):
         with solara.Div(classes=["asset-form-row"]):
@@ -205,6 +218,14 @@ def BaseAssetEditor():
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 손실 UGV 수", classes=["asset-form-label"])
             solara.InputText("", value=lost_ugv, on_value=set_lost_ugv)
+
+        with solara.Div(classes=["asset-form-row"]):
+            solara.Text("출발지 위도", classes=["asset-form-label"])
+            solara.InputText("", value=dep_lat, on_value=set_dep_lat)
+
+        with solara.Div(classes=["asset-form-row"]):
+            solara.Text("출발지 경도", classes=["asset-form-label"])
+            solara.InputText("", value=dep_lon, on_value=set_dep_lon)
 
         with solara.Div(classes=["asset-form-action-row"]):
             solara.Button("저장", on_click=save_base_asset, classes=["asset-save-btn"])
@@ -622,7 +643,7 @@ def make_success_chart_svg():
         kpi.get("user2", {}).get("success", 0),
         kpi.get("user3", {}).get("success", 0),
     ]
-    return build_line_chart_svg("임무 성공률", ["1제대", "2제대", "3제대"], values)
+    return build_line_chart_svg("제대별 임무 성공률", ["1제대", "2제대", "3제대"], values)
 
 
 def make_risk_chart_svg():
@@ -632,7 +653,7 @@ def make_risk_chart_svg():
         kpi.get("user2", {}).get("risk", 0),
         kpi.get("user3", {}).get("risk", 0),
     ]
-    return build_line_chart_svg("임무 위험률", ["1제대", "2제대", "3제대"], values)
+    return build_line_chart_svg("제대별 임무 위험률", ["1제대", "2제대", "3제대"], values)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -659,19 +680,11 @@ def CommanderPage():
 
     def start_execution():
         set_run_state("run")
-        timer_running.value = True
-        timer_end_ts.value = time.time() + 2 * 3600 + 20 * 60
-        timer_remaining_secs.value = 8400   # 2시간 20분
-        remaining_time_text_global.value = "02:20:00"
-        video_should_play.value = True
+        start_mission_timer()
 
     def stop_execution():
         set_run_state("stop")
-        timer_running.value = False
-        timer_end_ts.value = None
-        timer_remaining_secs.value = 0
-        remaining_time_text_global.value = "00:00:00"
-        video_should_play.value = False
+        stop_mission_timer()
 
     def deliver_mission():
         mission_delivery_data.value = {
@@ -695,7 +708,7 @@ def CommanderPage():
             },
             "mission_info": {
                 u: {
-                    "mission_mode": active_btn.value,
+                    "mission_mode": mission_mode.value,
                     "operating_ugv_count": asset_data.value.get(u, {}).get("available_ugv", 0),
                     "departure_time": departure_times.value.get(u, ""),
                     "arrival_time": arrival_times.value.get(u, ""),
@@ -709,9 +722,9 @@ def CommanderPage():
         set_toast_count(toast_count + 1)
 
     now = datetime.now()
-    map_label_1 = f"{(now + timedelta(hours=1)).hour:02d}:00 LTWR Forecast"
-    map_label_2 = f"{(now + timedelta(hours=2)).hour:02d}:00 LTWR Forecast"
-    map_label_3 = f"{(now + timedelta(hours=3)).hour:02d}:00 LTWR Forecast"
+    map_label_1 = "1시간 뒤"
+    map_label_2 = "2시간 뒤"
+    map_label_3 = "3시간 뒤"
 
     unit_info_rows = [
         {"unit": "1제대", "ugv": asset_data.value.get("user1", {}).get("available_ugv", 0), "depart": departure_times.value.get("user1", "-"), "arrive": arrival_times.value.get("user1", "-"), "recon": unit1_recon or "-"},
@@ -1127,13 +1140,13 @@ def CommanderPage():
                     with solara.Div(classes=["mission-mode-card"]):
                         solara.Text("임무 모드", classes=["mode-title"])
                         with solara.Div(classes=["mode-btn-row"]):
-                            for b in ["균형", "정찰", "신속"]:
+                            for b in ["균형", "정밀", "신속"]:
                                 solara.Button(
                                     b,
-                                    on_click=lambda x=b: set_active_button(x),
+                                    on_click=lambda x=b: mission_mode.set(x),
                                     classes=[
                                         "mode-btn",
-                                        "mode-btn-active" if active_btn.value == b else "mode-btn-default",
+                                        "mode-btn-active" if mission_mode.value == b else "mode-btn-default",
                                     ],
                                 )
 
@@ -1172,7 +1185,7 @@ def CommanderPage():
                     # 임무 성공률 / 위험률 SVG 차트
                     with solara.Div(classes=["mission-chart-card"]):
                         with solara.Div(classes=["chart-block"]):
-                            solara.Text("임무 성공률", classes=["chart-title"])
+                            solara.Text("제대별 임무 성공률", classes=["chart-title"])
                             with solara.Div(classes=["chart-placeholder"]):
                                 solara.HTML(tag="div", unsafe_innerHTML=make_success_chart_svg())
 
@@ -1180,7 +1193,7 @@ def CommanderPage():
                             pass
 
                         with solara.Div(classes=["chart-block"]):
-                            solara.Text("임무 위험률", classes=["chart-title"])
+                            solara.Text("제대별 임무 위험률", classes=["chart-title"])
                             with solara.Div(classes=["chart-placeholder"]):
                                 solara.HTML(tag="div", unsafe_innerHTML=make_risk_chart_svg())
 
@@ -1245,7 +1258,13 @@ def CommanderPage():
                                 elif asset_tab == "3제대 기본자산":
                                     UnitAssetEditor("user3", "3제대 기본자산")
                 else:
-                    solara.Text("LTWR 현황", classes=["card-label"], style={"font-size": "18px", "margin-bottom": "15px"})
+                    solara.HTML(tag="div", unsafe_innerHTML=(
+                        "<div class='card-label' style='font-size:18px;margin-bottom:15px;'>"
+                        "육군기상작전위험도"
+                        "<span style='font-size:15px;'>LTWR</span>"
+                        " 현황"
+                        "</div>"
+                    ))
                     MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
                     MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
                     MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
@@ -1272,23 +1291,15 @@ def UserPage():
 
     def start_execution():
         set_run_state("run")
-        timer_running.value = True
-        timer_end_ts.value = time.time() + 2 * 3600 + 20 * 60
-        timer_remaining_secs.value = 8400   # 2시간 20분
-        remaining_time_text_global.value = "02:20:00"
-        video_should_play.value = True
+        start_mission_timer()
 
     def stop_execution():
         set_run_state("stop")
-        timer_running.value = False
-        timer_end_ts.value = None
-        timer_remaining_secs.value = 0
-        remaining_time_text_global.value = "00:00:00"
-        video_should_play.value = False
+        stop_mission_timer()
 
     delivered = mission_delivery_data.value
     current_mission_info = delivered.get("mission_info", {}).get(current_user, {})
-    fixed_mission_mode = current_mission_info.get("mission_mode", "균형") or "균형"
+    fixed_mission_mode = current_mission_info.get("mission_mode", mission_mode.value) or mission_mode.value
 
     my_unit_row = {
         "unit":   my_unit_label,
@@ -1299,9 +1310,9 @@ def UserPage():
     }
 
     now = datetime.now()
-    map_label_1 = f"{(now + timedelta(hours=1)).hour:02d}:00 LTWR Forecast"
-    map_label_2 = f"{(now + timedelta(hours=2)).hour:02d}:00 LTWR Forecast"
-    map_label_3 = f"{(now + timedelta(hours=3)).hour:02d}:00 LTWR Forecast"
+    map_label_1 = "1시간 뒤"
+    map_label_2 = "2시간 뒤"
+    map_label_3 = "3시간 뒤"
 
     # ── CommanderPage 기준 스타일 그대로 적용 ────────────────
     solara.Style("""
@@ -1707,13 +1718,13 @@ def UserPage():
                     # 임무 성공률 / 위험률 지표 카드 (unit_kpi_data 에서 읽어 지휘관 차트와 동기화)
                     _my_kpi = unit_kpi_data.value.get(current_user, {"success": 0, "risk": 0})
                     with solara.Div(classes=["metric-card"]):
-                        solara.Text("임무 성공률", classes=["metric-label"])
+                        solara.Text("제대별 임무 성공률", classes=["metric-label"])
                         with solara.Div(classes=["metric-value-row"]):
                             solara.Text(str(_my_kpi["success"]), classes=["metric-value"])
                             solara.Text("%", classes=["metric-unit-inline"])
 
                     with solara.Div(classes=["metric-card"]):
-                        solara.Text("임무 위험률", classes=["metric-label"])
+                        solara.Text("제대별 임무 위험률", classes=["metric-label"])
                         with solara.Div(classes=["metric-value-row"]):
                             solara.Text(str(_my_kpi["risk"]), classes=["metric-value"])
                             solara.Text("%", classes=["metric-unit-inline"])
@@ -1773,7 +1784,13 @@ def UserPage():
                                 else:
                                     UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
                 else:
-                    solara.Text("LTWR 현황", classes=["card-label"], style={"font-size": "18px", "margin-bottom": "15px"})
+                    solara.HTML(tag="div", unsafe_innerHTML=(
+                        "<div class='card-label' style='font-size:18px;margin-bottom:15px;'>"
+                        "육군기상작전위험도"
+                        "<span style='font-size:15px;'>LTWR</span>"
+                        " 현황"
+                        "</div>"
+                    ))
                     MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
                     MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
                     MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
@@ -1785,40 +1802,307 @@ def UserPage():
 # ──────────────────────────────────────────────────────────────
 @solara.component
 def CommanderInputPage():
-    unit1_lat,   set_unit1_lat   = solara.use_state("")
-    unit1_lng,   set_unit1_lng   = solara.use_state("")
-    unit1_recon, set_unit1_recon = solara.use_state("")
-    unit2_lat,   set_unit2_lat   = solara.use_state("")
-    unit2_lng,   set_unit2_lng   = solara.use_state("")
-    unit2_recon, set_unit2_recon = solara.use_state("")
-    unit3_lat,   set_unit3_lat   = solara.use_state("")
-    unit3_lng,   set_unit3_lng   = solara.use_state("")
-    unit3_recon, set_unit3_recon = solara.use_state("")
+    mission_inputs = solara.use_reactive({
+        "departure": {"lat": "", "lng": ""},
+        "targets": [
+            {"lat": "", "lng": "", "patrol_time": "00:30:00"},
+            {"lat": "", "lng": "", "patrol_time": "00:30:00"},
+            {"lat": "", "lng": "", "patrol_time": "00:30:00"},
+        ],
+    })
+    last_click_seq = solara.use_reactive(0)
+    marker_push_seq = solara.use_reactive(0)
 
-    def handle_submit():
+    def format_coord(value):
+        if value is None:
+            return ""
+        try:
+            return f"{float(value):.6f}"
+        except (TypeError, ValueError):
+            return str(value).strip()
+
+    def parse_hms(value):
+        try:
+            hour, minute, second = value.strip().split(":")
+            return int(hour) * 3600 + int(minute) * 60 + int(second)
+        except Exception:
+            return 1800
+
+    def build_markers_payload(state, seq):
+        markers = []
+        departure = state["departure"]
+        try:
+            if departure["lat"].strip() and departure["lng"].strip():
+                markers.append({
+                    "id": "departure",
+                    "unit": 0,
+                    "lat": float(departure["lat"]),
+                    "lng": float(departure["lng"]),
+                    "kind": "departure",
+                    "departure": True,
+                })
+        except (KeyError, TypeError, ValueError):
+            pass
+
+        for index, target in enumerate(state["targets"], start=1):
+            try:
+                if target["lat"].strip() and target["lng"].strip():
+                    markers.append({
+                        "id": f"target-{index}",
+                        "unit": index,
+                        "lat": float(target["lat"]),
+                        "lng": float(target["lng"]),
+                        "kind": "arrival",
+                        "departure": False,
+                    })
+            except (KeyError, TypeError, ValueError):
+                continue
+        return {"seq": seq, "markers": markers}
+
+    def push_markers(state, seq):
+        import requests as _req
+
+        try:
+            _req.post(
+                f"{BACKEND_HTTP_BASE}/api/map/input/markers",
+                json=build_markers_payload(state, seq),
+                timeout=2,
+            )
+        except Exception:
+            pass
+
+    def apply_inputs(next_state, *, sync_markers=True):
+        mission_inputs.set(next_state)
+        if sync_markers:
+            marker_push_seq.value += 1
+            seq = marker_push_seq.value
+            threading.Thread(target=push_markers, args=(next_state, seq), daemon=True).start()
+
+    def update_departure(field, value):
+        current = mission_inputs.value
+        next_state = {
+            **current,
+            "departure": {**current["departure"], field: value},
+            "targets": [dict(target) for target in current["targets"]],
+        }
+        apply_inputs(next_state)
+
+    def update_target(index, field, value):
+        current = mission_inputs.value
+        targets = [dict(target) for target in current["targets"]]
+        targets[index] = {**targets[index], field: value}
+        apply_inputs({
+            **current,
+            "departure": dict(current["departure"]),
+            "targets": targets,
+        })
+
+    def persist_local_state(state):
         destination_data.set({
-            "user1": {"lat": unit1_lat, "lng": unit1_lng},
-            "user2": {"lat": unit2_lat, "lng": unit2_lng},
-            "user3": {"lat": unit3_lat, "lng": unit3_lng},
+            f"user{index}": {"lat": target["lat"], "lng": target["lng"]}
+            for index, target in enumerate(state["targets"], start=1)
         })
         mission_settings.set({
             **mission_settings.value,
             "recon_times": {
-                "user1": unit1_recon,
-                "user2": unit2_recon,
-                "user3": unit3_recon,
+                f"user{index}": target["patrol_time"]
+                for index, target in enumerate(state["targets"], start=1)
             },
         })
-        # asset_data 에도 좌표 반영
-        updated = dict(asset_data.value)
-        for key, lat, lng in [("user1", unit1_lat, unit1_lng),
-                               ("user2", unit2_lat, unit2_lng),
-                               ("user3", unit3_lat, unit3_lng)]:
-            updated[key] = {**updated[key], "target_lat": str(lat), "target_lon": str(lng)}
-        asset_data.set(updated)
 
-        mission_note.set("지휘관 입력 완료")
-        workflow_step.set(1)  # → LoadingPage
+        updated_assets = dict(asset_data.value)
+        updated_assets["base"] = {
+            **updated_assets["base"],
+            "departure_lat": state["departure"]["lat"],
+            "departure_lon": state["departure"]["lng"],
+        }
+        for index, target in enumerate(state["targets"], start=1):
+            user_key = f"user{index}"
+            updated_assets[user_key] = {
+                **updated_assets[user_key],
+                "target_lat": target["lat"],
+                "target_lon": target["lng"],
+            }
+        asset_data.set(updated_assets)
+        mission_note.set("\uc9c0\ud718\uad00 \uc785\ub825 \uc644\ub8cc")
+        return updated_assets
+
+    def load_initial_inputs():
+        base = asset_data.value.get("base", {})
+        recon_times = mission_settings.value.get("recon_times", {})
+        initial_state = {
+            "departure": {
+                "lat": str(base.get("departure_lat", "") or ""),
+                "lng": str(base.get("departure_lon", "") or ""),
+            },
+            "targets": [
+                {
+                    "lat": str(asset_data.value.get(f"user{index}", {}).get("target_lat", "") or ""),
+                    "lng": str(asset_data.value.get(f"user{index}", {}).get("target_lon", "") or ""),
+                    "patrol_time": str(recon_times.get(f"user{index}", "00:30:00") or "00:30:00"),
+                }
+                for index in range(1, 4)
+            ],
+        }
+        apply_inputs(initial_state)
+
+    solara.use_effect(load_initial_inputs, [])
+
+    @solara.lab.use_task
+    async def poll_map_click():
+        import requests as _req
+
+        def _fetch():
+            try:
+                response = _req.get(
+                    f"{BACKEND_HTTP_BASE}/api/map/input/pending-click",
+                    timeout=2,
+                )
+                return response.json()
+            except Exception:
+                return None
+
+        while True:
+            data = await asyncio.to_thread(_fetch)
+            if data and data.get("seq", 0) > last_click_seq.value:
+                last_click_seq.value = data["seq"]
+                lat = data.get("lat")
+                lng = data.get("lng")
+                unit = data.get("unit")
+                kind = data.get("kind")
+                is_departure = bool(data.get("departure")) or kind == "departure" or unit == 0
+                if lat is not None and lng is not None:
+                    current = mission_inputs.value
+                    next_state = {
+                        "departure": dict(current["departure"]),
+                        "targets": [dict(target) for target in current["targets"]],
+                    }
+                    if is_departure:
+                        next_state["departure"] = {
+                            "lat": format_coord(lat),
+                            "lng": format_coord(lng),
+                        }
+                    elif unit in (1, 2, 3):
+                        next_state["targets"][unit - 1] = {
+                            **next_state["targets"][unit - 1],
+                            "lat": format_coord(lat),
+                            "lng": format_coord(lng),
+                        }
+                    apply_inputs(next_state)
+            await asyncio.sleep(0.1)
+
+    def handle_submit():
+        state_snapshot = {
+            "departure": dict(mission_inputs.value["departure"]),
+            "targets": [dict(target) for target in mission_inputs.value["targets"]],
+        }
+        updated_assets = persist_local_state(state_snapshot)
+
+        def _do_api():
+            import requests as _req
+
+            headers = {}
+            if auth_token.value:
+                headers["Authorization"] = f"Bearer {auth_token.value}"
+
+            try:
+                departure_lat = float(state_snapshot["departure"]["lat"]) if state_snapshot["departure"]["lat"].strip() else 0.0
+                departure_lng = float(state_snapshot["departure"]["lng"]) if state_snapshot["departure"]["lng"].strip() else 0.0
+                total_ugv = max(1, min(4, int(updated_assets["base"].get("total_ugv", 4))))
+                mission_id = active_mission_id.value
+
+                if not mission_id:
+                    create_response = _req.post(
+                        f"{BACKEND_HTTP_BASE}/api/missions",
+                        json={
+                            "name": f"{logged_in_user.value or 'CMD'} \uc784\ubb34",
+                            "echelon_no": 1,
+                            "total_ugv": total_ugv,
+                            "max_ugv_count": total_ugv,
+                            "mission_duration_min": 120,
+                            "departure_lat": departure_lat,
+                            "departure_lon": departure_lng,
+                        },
+                        headers=headers,
+                        timeout=5,
+                    )
+                    if create_response.status_code != 201:
+                        return
+                    mission_id = create_response.json().get("id")
+                    if not mission_id:
+                        return
+                    active_mission_id.set(mission_id)
+
+                patch_response = _req.patch(
+                    f"{BACKEND_HTTP_BASE}/api/missions/{mission_id}",
+                    json={
+                        "name": f"{logged_in_user.value or 'CMD'} \uc784\ubb34",
+                        "echelon_no": 1,
+                        "total_ugv": total_ugv,
+                        "max_ugv_count": total_ugv,
+                        "mission_duration_min": 120,
+                        "departure_lat": departure_lat,
+                        "departure_lon": departure_lng,
+                    },
+                    headers=headers,
+                    timeout=5,
+                )
+                if patch_response.status_code != 200:
+                    return
+
+                targets_payload = []
+                for index, target in enumerate(state_snapshot["targets"], start=1):
+                    if not target["lat"].strip() or not target["lng"].strip():
+                        continue
+                    try:
+                        targets_payload.append({
+                            "seq": index,
+                            "lat": float(target["lat"]),
+                            "lon": float(target["lng"]),
+                            "patrol_duration_sec": parse_hms(target["patrol_time"]),
+                        })
+                    except ValueError:
+                        continue
+
+                targets_response = _req.post(
+                    f"{BACKEND_HTTP_BASE}/api/missions/{mission_id}/targets",
+                    json=targets_payload,
+                    headers=headers,
+                    timeout=5,
+                )
+                if targets_response.status_code not in (200, 201):
+                    return
+
+                run_response = _req.post(
+                    f"{BACKEND_HTTP_BASE}/api/missions/{mission_id}/runs",
+                    headers=headers,
+                    timeout=5,
+                )
+                if run_response.status_code != 201:
+                    return
+                run_id = run_response.json().get("id")
+                if not run_id:
+                    return
+                active_run_id.set(run_id)
+
+                start_response = _req.post(
+                    f"{BACKEND_HTTP_BASE}/api/runs/{run_id}/start",
+                    headers=headers,
+                    timeout=5,
+                )
+                if start_response.status_code not in (200, 201):
+                    return
+            except Exception:
+                return
+
+        threading.Thread(target=_do_api, daemon=True).start()
+
+        try:
+            post_operator_mission_config()
+        except Exception:
+            pass
+
+        workflow_step.set(1)
 
     solara.Style("""
         html, body, #app, .v-application, .v-application__wrap,
@@ -1828,23 +2112,23 @@ def CommanderInputPage():
             overflow: hidden !important; background: #0b1426 !important;
         }
 
-        .commander-input-root { width: 100vw; height: 100dvh; overflow: hidden; background: #0b1426; box-sizing: border-box; padding: 16px; }
+        .commander-input-root { width: 100vw; height: 100dvh; overflow: hidden; background: #0b1426; box-sizing: border-box; padding: 12px; }
 
         .commander-input-shell {
             width: 100%; height: 100%;
-            display: grid; grid-template-columns: 1.95fr 1.05fr;
-            gap: 16px; min-height: 0;
+            display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(420px, 0.98fr);
+            gap: 12px; min-height: 0;
         }
 
         .commander-map-panel {
             background: linear-gradient(180deg, rgba(9,20,42,0.96), rgba(8,18,38,0.98));
-            border: 1px solid rgba(45,58,84,0.7); border-radius: 18px; padding: 20px;
+            border: 1px solid rgba(45,58,84,0.7); border-radius: 18px; padding: 16px;
             display: flex; flex-direction: column; min-height: 0; height: 100%;
             box-sizing: border-box; overflow: hidden;
         }
 
-        .commander-map-header { color: white; font-size: 24px; font-weight: 800; margin-bottom: 8px; }
-        .commander-map-sub    { color: #94a3b8; font-size: 14px; margin-bottom: 16px; line-height: 1.45; }
+        .commander-map-header { color: white; font-size: 22px; font-weight: 800; margin-bottom: 6px; }
+        .commander-map-sub    { color: #94a3b8; font-size: 13px; margin-bottom: 12px; line-height: 1.4; }
 
         .commander-map-box {
             flex: 1; min-height: 0; border-radius: 16px;
@@ -1855,84 +2139,101 @@ def CommanderInputPage():
             width: 100%; height: 100%; border: none; display: block;
         }
 
-        .commander-map-title   { font-size: 22px; font-weight: 700; color: white; margin-bottom: 4px; }
-        .commander-map-caption { font-size: 15px; color: #cbd5e1; line-height: 1.5; }
-
         .commander-side-panel {
             background: rgba(22,34,56,0.88); border: 1px solid rgba(45,58,84,0.7);
-            border-radius: 18px; padding: 14px;
-            display: flex; flex-direction: column; gap: 10px;
-            min-height: 0; height: 100%; box-sizing: border-box; overflow: hidden;
+            border-radius: 18px; padding: 12px;
+            display: flex; flex-direction: column; gap: 8px;
+            min-height: 0; height: 100%; box-sizing: border-box;
+            overflow-x: hidden; overflow-y: auto;
+            scrollbar-width: thin;
         }
 
         .commander-section-card {
-            background: rgba(11,20,38,0.92); border: 1px solid rgba(45,58,84,0.65);
-            border-radius: 14px; padding: 14px; flex: 1; min-height: 0;
-            display: flex; flex-direction: column; justify-content: center;
-            box-sizing: border-box; overflow: hidden;
+            background: rgba(15,23,42,0.9); border-radius: 14px; padding: 10px 12px;
+            border: 1px solid rgba(51,65,85,0.75);
+        }
+        .commander-section-title { color: white; font-size: 16px; font-weight: 800; margin-bottom: 8px; }
+        .commander-input-group { display: flex; flex-direction: column; gap: 6px; }
+        .commander-field-row { display: grid; grid-template-columns: 68px 1fr; align-items: center; gap: 8px; }
+        .commander-field-label-inline { color: #dbeafe; font-size: 12px; font-weight: 700; }
+
+        .commander-submit-wrap {
+            margin-top: auto;
+            position: sticky;
+            bottom: 0;
+            padding-top: 8px;
+            padding-bottom: 2px;
+            background: linear-gradient(180deg, rgba(22,34,56,0), rgba(22,34,56,0.96) 28%);
         }
 
-        .commander-section-title { color: white; font-size: 16px; font-weight: 700; margin-bottom: 10px; flex-shrink: 0; }
-
-        .commander-input-group { display: flex; flex-direction: column; gap: 10px; flex: 1; justify-content: center; min-height: 0; }
-
-        .commander-field-row { display: grid; grid-template-columns: 72px 1fr; align-items: center; gap: 10px; min-height: 0; }
-
-        .commander-field-label-inline { color: #cbd5e1; font-size: 14px; font-weight: 600; text-align: left; white-space: nowrap; }
-
-        .commander-submit-wrap { margin-top: 0; padding-top: 0; flex-shrink: 0; }
-
-        .commander-side-panel .v-input              { margin-top: 0 !important; padding-top: 0 !important; }
-        .commander-side-panel .v-input__control     { min-height: auto !important; }
-        .commander-side-panel .v-text-field         { margin-top: 0 !important; }
-        .commander-side-panel .v-label              { display: none !important; }
+        .commander-side-panel .v-input { margin: 0 !important; padding: 0 !important; }
+        .commander-side-panel .v-messages,
+        .commander-side-panel .v-label { display: none !important; }
         .commander-side-panel .v-input__slot,
         .commander-side-panel .v-text-field > .v-input__control > .v-input__slot {
             background: rgba(30,41,59,0.9) !important; border-radius: 10px !important;
-            box-shadow: none !important; min-height: 46px !important; padding: 0 12px !important;
+            box-shadow: none !important; min-height: 40px !important; padding: 0 10px !important;
         }
-        .commander-side-panel input { color: white !important; font-size: 15px !important; }
+        .commander-side-panel input { color: white !important; font-size: 14px !important; }
+
+        @media (max-width: 1400px) {
+            .commander-input-shell {
+                grid-template-columns: minmax(0, 1.6fr) minmax(380px, 1fr);
+            }
+        }
     """)
 
     with solara.Div(classes=["commander-input-root"]):
         with solara.Div(classes=["commander-input-shell"]):
-            # 좌측: 지도 영역 (Leaflet 지형 + 버퍼 오버레이)
             with solara.Div(classes=["commander-map-panel"]):
-                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-map-header'>작전 좌표 입력</div>")
-                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-map-sub'>지형 지도에서 제대별 도착지를 확인하세요.</div>")
+                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-map-header'>\uc791\uc804 \uc9c0\uc5ed</div>")
+                solara.HTML(tag="div", unsafe_innerHTML=(
+                    "<div class='commander-map-sub'>"
+                    "\uc9c0\ub3c4\uc5d0\uc11c <b>\uc6b0\ud074\ub9ad</b>\uc73c\ub85c \ucd9c\ubc1c\uc9c0/\ub3c4\ucc29\uc9c0\ub97c \uc9c0\uc815\ud558\uac70\ub098, \uc6b0\uce21 \uc785\ub825\ub780\uc5d0 \uc9c1\uc811 \uc88c\ud45c\ub97c \uc785\ub825\ud558\uc138\uc694."
+                    "<br>\ud30c\ub780 \ud540: \ub3c4\ucc29\uc9c0 &nbsp; \ube68\uac04 \ud540: \ucd9c\ubc1c\uc9c0"
+                    "</div>"
+                ))
                 with solara.Div(classes=["commander-map-box"]):
-                    _map_html = build_base_map_html(BACKEND_HTTP_BASE)
                     solara.HTML(
                         tag="iframe",
                         attributes={
-                            "srcdoc": _map_html,
+                            "src": f"{BACKEND_HTTP_BASE}/api/map/input/html",
                             "style": "width:100%; height:100%; border:none; display:block;",
                         },
                     )
 
-            # 우측: 입력 패널 (1~3제대 좌표 + 정찰시간)
             with solara.Div(classes=["commander-side-panel"]):
-                for (title, lat_v, set_lat, lng_v, set_lng, recon_v, set_recon) in [
-                    ("1제대 도착지 입력", unit1_lat, set_unit1_lat, unit1_lng, set_unit1_lng, unit1_recon, set_unit1_recon),
-                    ("2제대 도착지 입력", unit2_lat, set_unit2_lat, unit2_lng, set_unit2_lng, unit2_recon, set_unit2_recon),
-                    ("3제대 도착지 입력", unit3_lat, set_unit3_lat, unit3_lng, set_unit3_lng, unit3_recon, set_unit3_recon),
-                ]:
+                with solara.Div(classes=["commander-section-card"]):
+                    solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-section-title'>\ucd9c\ubc1c\uc9c0 \uc785\ub825</div>")
+                    with solara.Div(classes=["commander-input-group"]):
+                        with solara.Div(classes=["commander-field-row"]):
+                            solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc704\ub3c4</div>")
+                            solara.InputText("", value=mission_inputs.value["departure"]["lat"], on_value=lambda value: update_departure("lat", value), continuous_update=True)
+                        with solara.Div(classes=["commander-field-row"]):
+                            solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uacbd\ub3c4</div>")
+                            solara.InputText("", value=mission_inputs.value["departure"]["lng"], on_value=lambda value: update_departure("lng", value), continuous_update=True)
+
+                for index, title in enumerate([
+                    "1\uc81c\ub300 \ub3c4\ucc29\uc9c0 \uc785\ub825",
+                    "2\uc81c\ub300 \ub3c4\ucc29\uc9c0 \uc785\ub825",
+                    "3\uc81c\ub300 \ub3c4\ucc29\uc9c0 \uc785\ub825",
+                ]):
                     with solara.Div(classes=["commander-section-card"]):
                         solara.HTML(tag="div", unsafe_innerHTML=f"<div class='commander-section-title'>{title}</div>")
                         with solara.Div(classes=["commander-input-group"]):
                             with solara.Div(classes=["commander-field-row"]):
-                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>위도</div>")
-                                solara.InputText("", value=lat_v, on_value=set_lat)
+                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc704\ub3c4</div>")
+                                solara.InputText("", value=mission_inputs.value["targets"][index]["lat"], on_value=lambda value, target_index=index: update_target(target_index, "lat", value), continuous_update=True)
                             with solara.Div(classes=["commander-field-row"]):
-                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>경도</div>")
-                                solara.InputText("", value=lng_v, on_value=set_lng)
+                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uacbd\ub3c4</div>")
+                                solara.InputText("", value=mission_inputs.value["targets"][index]["lng"], on_value=lambda value, target_index=index: update_target(target_index, "lng", value), continuous_update=True)
                             with solara.Div(classes=["commander-field-row"]):
-                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>정찰시간</div>")
-                                solara.InputText("", value=recon_v, on_value=set_recon)
+                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc815\ucc30\uc2dc\uac04</div>")
+                                solara.InputText("", value=mission_inputs.value["targets"][index]["patrol_time"], on_value=lambda value, target_index=index: update_target(target_index, "patrol_time", value))
 
                 with solara.Div(classes=["commander-submit-wrap"]):
                     solara.Button(
-                        "시뮬레이션 실행",
+                        "\uc2dc\ubbac\ub808\uc774\uc158 \uc2e4\ud589",
                         on_click=handle_submit,
                         style={
                             "background-color": "#e67e22", "color": "white",
@@ -1942,10 +2243,6 @@ def CommanderInputPage():
                     )
 
 
-# ──────────────────────────────────────────────────────────────
-# [팀원 코드] 로딩 페이지 (세로 막대 애니메이션)
-# workflow_step=1 → 버튼 클릭 시 commander_data_ready=True, workflow_step=2
-# ──────────────────────────────────────────────────────────────
 @solara.component
 def LoadingPage():
     def go_to_commander_page():
@@ -2087,7 +2384,7 @@ def UserMissionPage():
     recon = mission_info.get("recon_time", "") or mission_settings.value.get("recon_times", {}).get(current_user, "")
     depart = mission_info.get("departure_time", "-")
     arrive = mission_info.get("arrival_time", "-")
-    mode = mission_info.get("mission_mode", active_btn.value) or active_btn.value
+    mode = mission_info.get("mission_mode", mission_mode.value) or mission_mode.value
 
     def go_to_user_page():
         workflow_step.set(1)
@@ -2267,7 +2564,7 @@ def CommanderHomeHeader():
 
         with solara.Column(gap="0px", style={"align-items": "center"}):
             solara.Text("남은시간", style={"font-size": "12px", "color": "#94a3b8"})
-            solara.Text(home_remaining_time.value, style={"font-size": "24px", "font-weight": "700", "color": "white"})
+            solara.Text(remaining_time_text_global.value, style={"font-size": "24px", "font-weight": "700", "color": "white"})
 
         with solara.Column(gap="6px", style={"align-items": "center", "min-width": "340px"}):
             solara.Text("자산현황", style={"font-size": "12px", "color": "#94a3b8"})
@@ -2313,7 +2610,7 @@ def OperatorHomeHeader():
 
         with solara.Column(gap="0px", style={"align-items": "center"}):
             solara.Text("남은시간", style={"font-size": "12px", "color": "#94a3b8"})
-            solara.Text(home_remaining_time.value, style={"font-size": "24px", "font-weight": "700", "color": "white"})
+            solara.Text(remaining_time_text_global.value, style={"font-size": "24px", "font-weight": "700", "color": "white"})
 
         with solara.Column(gap="6px", style={"align-items": "center"}):
             solara.Text("자산현황", style={"font-size": "12px", "color": "#94a3b8"})

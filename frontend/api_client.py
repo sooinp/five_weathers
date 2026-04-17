@@ -8,7 +8,7 @@ frontend/api_client.py
 import os
 import httpx
 
-BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BASE_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
 
 def _get(path: str, params: dict = None) -> dict | list:

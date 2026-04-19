@@ -292,7 +292,7 @@ def GridView():
 
         # 1) 상단 탭 줄
         with solara.Div(classes=["map-top-controls"]):
-            for m in ["위험도", "기동성", "센서"]:
+            for m in ["종합상황도", "기동기반", "센서기반"]:
                 solara.Button(
                     m,
                     on_click=lambda x=m: set_map_selection(x),
@@ -305,9 +305,6 @@ def GridView():
         # 2) 중앙 맵 영역 (팀원 코드: 시간 패널 포함)
         with solara.Div(classes=["map-main-display"]):
             with solara.Div(classes=["map-time-panel"]):
-                with solara.Div(classes=["time-chip"]):
-                    solara.Text(current_time_text.value)
-
                 with solara.Div(classes=["time-chip"]):
                     solara.Text(f"남은 시간 {remaining_display.value}")
 
@@ -336,7 +333,7 @@ def GridView():
                 )
             elif backend_alive.value:
                 # 백엔드 살아있음 → 그리드 맵
-                _layer_key = {"위험도": "risk", "기동성": "mobility", "센서": "sensor"}.get(
+                _layer_key = {"종합상황도": "risk", "기동기반": "mobility", "센서기반": "sensor"}.get(
                     map_selection.value, "risk"
                 )
                 solara.HTML(
@@ -398,7 +395,7 @@ def GridView():
 
                 with solara.Div(classes=["legend-item"]):
                     solara.Text("●", style={"color": "#cbd5e1", "font-size": "14px"})
-                    solara.Text("유인기")
+                    solara.Text("통제관")
 
                 num_ugvs = min(max(int(ratio_x.value), 0), 4)
                 for i in range(1, num_ugvs + 1):

@@ -1,6 +1,6 @@
 import solara
 
-
+workflowstep = solara.reactive(0)
 ################# 실행/종료 버튼으로 타이머 역할 하기 ######################
 
 timer_running = solara.reactive(False)
@@ -11,3 +11,4 @@ timer_remaining_secs = solara.reactive(8400)   # 2시간 20분 = 8400초
 
 # 영상 재생 제어 — True: 실행 중 (play), False: 정지
 video_should_play = solara.reactive(False)
+

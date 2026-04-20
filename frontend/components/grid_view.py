@@ -266,7 +266,7 @@ def GridView():
 
         # 1) 상단 탭 줄
         with solara.Div(classes=["map-top-controls"]):
-            for m in ["종합상황도", "기동상황도", "센서상황도"]:
+            for m in ["종합상황도", "기동기반", "센서기반"]:
                 solara.Button(
                     m,
                     on_click=lambda x=m: set_map_selection(x),
@@ -283,7 +283,7 @@ def GridView():
                     solara.Text(current_time_text.value)
 
                 with solara.Div(classes=["time-chip"]):
-                    solara.Text(f"남은 시간 {remaining_time_text_global.value}")
+                    solara.Text(f"남은 시간 {remaining_display.value}")
 
             # 우선순위: 영상(MP4) > 시뮬 HTML > 그리드 맵 > 대기 화면
             # (video_available, sim_available, backend_alive 는 use_task로 비동기 체크)
@@ -310,7 +310,7 @@ def GridView():
                 )
             elif backend_alive.value:
                 # 백엔드 살아있음 → 그리드 맵
-                _layer_key = {"종합상황도": "risk", "기동상황도": "mobility", "센서상황도": "sensor"}.get(
+                _layer_key = {"종합상황도": "risk", "기동기반": "mobility", "센서기반": "sensor"}.get(
                     map_selection.value, "risk"
                 )
                 solara.HTML(

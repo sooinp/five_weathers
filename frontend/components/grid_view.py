@@ -8,7 +8,7 @@ frontend/components/grid_view.py
 - 위험도 / 기동성 / 센서 레이어 탭 전환
 - 맵 본체 렌더링
 - 현재 시각 + 남은 시간 패널 (map-time-panel)
-- 범례 + 경로 수정 버튼 (5초 활성 / 10초 비활성 자동 토글)
+- 범례
 """
 
 import solara
@@ -51,22 +51,22 @@ def GridView():
     sim_available   = solara.use_reactive(False)
     video_available = solara.use_reactive(False)  # MP4 영상 사용 가능 여부
 
-    # 팀원 코드: 경로 수정 버튼 자동 토글 루프 (5초 on / 10초 off)
-    @solara.lab.use_task
-    async def button_control_loop():
-        while True:
-            await asyncio.sleep(0.5)
-            current_now = time.time()
-            elapsed = current_now - last_toggle_time.value
+    # # 팀원 코드: 경로 수정 버튼 자동 토글 루프 (5초 on / 10초 off)
+    # @solara.lab.use_task
+    # async def button_control_loop():
+    #     while True:
+    #         await asyncio.sleep(0.5)
+    #         current_now = time.time()
+    #         elapsed = current_now - last_toggle_time.value
 
-            if is_active.value:
-                if elapsed >= 5.0:
-                    is_active.value = False
-                    last_toggle_time.value = current_now
-            else:
-                if elapsed >= 10.0:
-                    is_active.value = True
-                    last_toggle_time.value = current_now
+    #         if is_active.value:
+    #             if elapsed >= 5.0:
+    #                 is_active.value = False
+    #                 last_toggle_time.value = current_now
+    #         else:
+    #             if elapsed >= 10.0:
+    #                 is_active.value = True
+    #                 last_toggle_time.value = current_now
 
     # 임무 타이머 카운트다운 (0.5초마다 10분 감산 — 7초=14틱에 02:20:00→00:00:00)
     @solara.lab.use_task
@@ -291,16 +291,16 @@ def GridView():
     with solara.Div(classes=["gridview-root"]):
 
         # 1) 상단 탭 줄
-        with solara.Div(classes=["map-top-controls"]):
-            for m in ["종합상황도", "기동기반", "센서기반"]:
-                solara.Button(
-                    m,
-                    on_click=lambda x=m: set_map_selection(x),
-                    classes=[
-                        "action-btn",
-                        "btn-active" if map_selection.value == m else "btn-default",
-                    ],
-                )
+        # with solara.Div(classes=["map-top-controls"]):
+        #     for m in ["상황도", "기동기반", "센서기반"]:
+        #         solara.Button(
+        #             m,
+        #             on_click=lambda x=m: set_map_selection(x),
+        #             classes=[
+        #                 "action-btn",
+        #                 "btn-active" if map_selection.value == m else "btn-default",
+        #             ],
+        #         )
 
         # 2) 중앙 맵 영역 (팀원 코드: 시간 패널 포함)
         with solara.Div(classes=["map-main-display"]):
@@ -333,7 +333,7 @@ def GridView():
                 )
             elif backend_alive.value:
                 # 백엔드 살아있음 → 그리드 맵
-                _layer_key = {"종합상황도": "risk", "기동기반": "mobility", "센서기반": "sensor"}.get(
+                _layer_key = {"상황도": "risk", "기동기반": "mobility", "센서기반": "sensor"}.get(
                     map_selection.value, "risk"
                 )
                 solara.HTML(
@@ -344,26 +344,22 @@ def GridView():
                     },
                 )
             else:
-                # 백엔드 꺼짐 → 인라인 대기 화면 (외부 서버 불필요)
-                _placeholder = "\n".join([
-                    "<!DOCTYPE html><html><head><meta charset='utf-8'><style>",
-                    "*{margin:0;padding:0;box-sizing:border-box}",
-                    "body{width:100vw;height:100vh;background:#0f1726;",
-                    "display:flex;flex-direction:column;",
-                    "align-items:center;justify-content:center;gap:18px}",
-                    ".icon{font-size:48px;opacity:0.35}",
-                    ".msg{color:#94a3b8;font-size:15px;font-family:sans-serif}",
-                    ".sub{color:#475569;font-size:12px;font-family:sans-serif}",
-                    "</style></head><body>",
-                    "<div class='icon'>\U0001f5fa\ufe0f</div>",
-                    "<div class='msg'>맵 데이터 대기 중...</div>",
-                    "<div class='sub'>시뮬레이션 결과가 수신되면 자동으로 표시됩니다.</div>",
-                    "</body></html>",
-                ])
+                import os
+                _html_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "..", "static",
+                    "animated_gar_overlay_with_paths_persistent_alerts_balance_11.html"
+                )
+                try:
+                    with open(_html_path, "r", encoding="utf-8") as f:
+                        _local_html = f.read()
+                except Exception:
+                    _local_html = "<body style='background:#0f1726;color:#94a3b8;display:flex;align-items:center;justify-content:center;height:100vh;'>파일 로딩 실패</body>"
+
                 solara.HTML(
                     tag="iframe",
                     attributes={
-                        "srcdoc": _placeholder,
+                        "srcdoc": _local_html,
                         "style": "position:absolute; top:0; left:0; width:100%; height:100%; border:none;",
                     },
                 )
@@ -376,8 +372,8 @@ def GridView():
                         tag="div",
                         unsafe_innerHTML=(
                             '<svg width="18" height="22" viewBox="0 0 24 24" fill="none">'
-                            '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#10B981"/>'
-                            '<circle cx="12" cy="9" r="3" fill="white"/></svg>'
+                            '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#f97316"/>'
+                            '<polygon points="12,5.5 13.1,8.2 16,8.2 13.8,10 14.6,12.8 12,11.2 9.4,12.8 10.2,10 8,8.2 10.9,8.2" fill="white"/>''</svg>'
                         ),
                     )
                     solara.Text("출발지")
@@ -387,33 +383,56 @@ def GridView():
                         tag="div",
                         unsafe_innerHTML=(
                             '<svg width="18" height="22" viewBox="0 0 24 24" fill="none">'
-                            '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#FF0000"/>'
+                            '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#06b6d4"/>'
                             '<circle cx="12" cy="9" r="3" fill="white"/></svg>'
                         ),
                     )
                     solara.Text("도착지")
 
                 with solara.Div(classes=["legend-item"]):
-                    solara.Text("●", style={"color": "#cbd5e1", "font-size": "14px"})
+                    solara.Text("★", style={"color": "#cbd5e1", "font-size": "14px"})
                     solara.Text("통제관")
+                    
 
-                num_ugvs = min(max(int(ratio_x.value), 0), 4)
-                for i in range(1, num_ugvs + 1):
-                    icon = UGV_ICONS.get(i, "●")
-                    with solara.Div(classes=["legend-item"]):
-                        solara.Text(icon, style={"font-size": "14px"})
-                        solara.Text(f"UGV-{i}")
+                # num_ugvs = min(max(int(ratio_x.value), 0), 4)
+                # for i in range(1, num_ugvs + 1):
+                #     icon = UGV_ICONS.get(i, "●")
+                #     with solara.Div(classes=["legend-item"]):
+                #         solara.Text(icon, style={"font-size": "14px"})
+                #         solara.Text(f"UGV-{i}")
+                
+                # num_ugvs = min(max(int(ratio_x.value), 0), 4)
+                # for i in range(1, num_ugvs + 1):
+                #     with solara.Div(classes=["legend-item"]):
+                #         solara.Text("●", style={"font-size": "14px"})
+                #         solara.Text(f"UGV-{i}")
+                        
+                with solara.Div(classes=["legend-item"]):
+                    solara.Text("●", style={"color": "#cbd5e1", "font-size": "14px"})
+                    solara.Text("UGV")
+                    
+                # with solara.Div(classes=["legend-item"]):
+                #     #solara.Text("●", style={"color": "#f97316", "font-size": "14px"})
+                #     solara.Text("1제대", style={"color": "#f97316"})
 
-            solara.Button(
-                "경로 수정",
-                on_click=handle_replan_click,
-                disabled=not is_active.value,
-                classes=["replan-btn"],
-                style={
-                    "background-color": "#e67e22" if is_active.value else "#374151",
-                    "color": "white" if is_active.value else "#94a3b8",
-                    "border": "none",
-                    "opacity": "1",
-                    "cursor": "pointer" if is_active.value else "default",
-                },
-            )
+                # with solara.Div(classes=["legend-item"]):
+                #     #solara.Text("●", style={"color": "#22d3ee", "font-size": "14px"})
+                #     solara.Text("2제대", style={"color": "#22d3ee"})
+
+                # with solara.Div(classes=["legend-item"]):
+                #     #solara.Text("●", style={"color": "#f472b6", "font-size": "14px"})
+                #     solara.Text("3제대", style={"color": "#f472b6"})
+
+            # solara.Button(
+            #     "경로 수정",
+            #     on_click=handle_replan_click,
+            #     disabled=not is_active.value,
+            #     classes=["replan-btn"],
+            #     style={
+            #         "background-color": "#e67e22" if is_active.value else "#374151",
+            #         "color": "white" if is_active.value else "#94a3b8",
+            #         "border": "none",
+            #         "opacity": "1",
+            #         "cursor": "pointer" if is_active.value else "default",
+            #     },
+            #)

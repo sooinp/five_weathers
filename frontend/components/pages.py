@@ -86,16 +86,16 @@ asset_data = solara.reactive({
     },
     "user1": {
         "controllers": 1,
-        "total_ugv": 5,
+        "total_ugv": 4,
         "lost_ugv": 0,
-        "available_ugv": 4,
+        "available_ugv": 2,
         "target_lat": "39.12",
         "target_lon": "12.45",
     },
     "user2": {
         "controllers": 1,
-        "total_ugv": 5,
-        "lost_ugv": 1,
+        "total_ugv": 4,
+        "lost_ugv": 0,
         "available_ugv": 4,
         "target_lat": "",
         "target_lon": "",
@@ -103,8 +103,8 @@ asset_data = solara.reactive({
     "user3": {
         "controllers": 1,
         "total_ugv": 5,
-        "lost_ugv": 0,
-        "available_ugv": 4,
+        "lost_ugv": 1,
+        "available_ugv": 3,
         "target_lat": "",
         "target_lon": "",
     },
@@ -121,15 +121,15 @@ operating_ugv_plan = solara.reactive({
 })
 
 departure_times = solara.reactive({
-    "user1": "02:20:00",
-    "user2": "02:10:00",
-    "user3": "02:30:00",
+    "user1": "03:00:00",
+    "user2": "03:00:00",
+    "user3": "03:00:00",
 })
 
 arrival_times = solara.reactive({
-    "user1": "07:30:00",
-    "user2": "08:30:00",
-    "user3": "08:00:00",
+    "user1": "04:50:00",
+    "user2": "05:30:00",
+    "user3": "06:10:00",
 })
 
 mission_delivery_data = solara.reactive({
@@ -740,9 +740,9 @@ def CommanderPage():
     # map_label_1 = f"{(now + timedelta(hours=1)).hour:02d}:00 LTWR Forecast"
     # map_label_2 = f"{(now + timedelta(hours=2)).hour:02d}:00 LTWR Forecast"
     # map_label_3 = f"{(now + timedelta(hours=3)).hour:02d}:00 LTWR Forecast"
-    map_label_1 = "+1 hour forecast"
-    map_label_2 = "+2 hours forecast"
-    map_label_3 = "+3 hours forecast"
+    map_label_1 = "h+1"
+    map_label_2 = "h+2"
+    map_label_3 = "h+3"
 
     unit_info_rows = [
         {"unit": "1제대", "ugv": asset_data.value.get("user1", {}).get("available_ugv", 0), "depart": departure_times.value.get("user1", "-"), "arrive": arrival_times.value.get("user1", "-"), "recon": unit1_recon or "-"},
@@ -801,12 +801,12 @@ def CommanderPage():
         .top-left-panel {
             grid-column: 1;
             grid-row: 1;
-            align-self: start;
+            align-self: stretch;
             background-color: rgba(22, 34, 56, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.55) !important;
-            border-radius: 16px; padding: 10px;
+            border-radius: 16px; padding: 8px;
             display: flex; flex-direction: column;
-            gap: 8px; box-sizing: border-box;
+            gap: 5px; box-sizing: border-box;
         }
 
         .top-right-panel {
@@ -830,27 +830,6 @@ def CommanderPage():
 
         .top-user-row { display: flex; align-items: center; gap: 8px; }
 
-        .back-btn {
-            min-width: 38px !important; width: 38px !important;
-            height: 38px !important; background-color: #0f172a !important;
-            color: white !important; border-radius: 10px !important;
-            font-size: 20px !important; padding: 0 !important;
-        }
-
-        .user-role-tab {
-            min-width: 78px !important; height: 38px !important;
-            border-radius: 10px !important; font-size: 15px !important;
-            font-weight: 700 !important; padding: 0 12px !important;
-            background-color: #1e3a5f !important; color: white !important;
-        }
-
-        .asset-tab-btn {
-            flex: 1; height: 38px !important;
-            border-radius: 10px !important; font-size: 14px !important;
-            font-weight: 700 !important; background-color: #203250 !important;
-            color: white !important; padding: 0 10px !important;
-        }
-
         .mission-mode-card {
             background-color: rgba(15, 23, 38, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.45) !important;
@@ -862,11 +841,6 @@ def CommanderPage():
 
         .mode-btn-row { display: flex; gap: 6px; }
 
-        .mode-btn {
-            flex: 1; height: 34px !important; border-radius: 9px !important;
-            font-size: 14px !important; font-weight: 700 !important;
-            padding: 0 !important; min-width: 0 !important;
-        }
 
         .mode-btn-active  { background-color: #e67e22 !important; color: white !important; }
         .mode-btn-default { background-color: #0f1b33 !important; color: white !important; }
@@ -1275,7 +1249,7 @@ def CommanderPage():
 
         .v-btn.back-btn {
             min-width: 72px !important;
-            height: 34px !important;
+            height: 32px !important;
             padding: 0 12px !important;
         }
 
@@ -1290,7 +1264,7 @@ def CommanderPage():
             background-color: rgba(15, 23, 38, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.45) !important;
             border-radius: 13px;
-            padding: 10px 12px;
+            padding: 9px 10px;
             display: flex;
             flex-direction: row;
             align-items: center;
@@ -1355,20 +1329,20 @@ def CommanderPage():
         }
 
         .home-btn {
-            min-width: 72px !important;
-            height: 38px !important;
+            min-width: 60px !important;
+            height: 32px !important;
             background-color: #0f172a !important;
             color: white !important;
             border-radius: 10px !important;
             font-size: 13px !important;
             font-weight: 700 !important;
-            padding: 0 12px !important;
+            padding: 0 8px !important;
         }
 
         .back-nav-btn {
-            min-width: 38px !important;
-            width: 38px !important;
-            height: 38px !important;
+            min-width: 32px !important;
+            width: 32px !important;
+            height: 32px !important;
             background-color: #0f172a !important;
             color: white !important;
             border-radius: 10px !important;
@@ -1378,8 +1352,8 @@ def CommanderPage():
         }
 
         .v-btn.user-role-tab {
-            min-width: 100px !important;
-            height: 38px !important;
+            min-width: 80px !important;
+            height: 32px !important;
             border-radius: 10px !important;
             font-size: 15px !important;
             font-weight: 700 !important;
@@ -1391,7 +1365,7 @@ def CommanderPage():
 
         .asset-tab-btn {
             flex: 1;
-            height: 38px !important;
+            height: 32px !important;
             border-radius: 10px !important;
             font-size: 14px !important;
             font-weight: 700 !important;
@@ -1404,7 +1378,7 @@ def CommanderPage():
             background-color: rgba(15, 23, 38, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.45) !important;
             border-radius: 13px;
-            padding: 9px 10px;
+            padding: 6px 8px;
             display: flex;
             flex-direction: row;
             align-items: center;
@@ -1437,7 +1411,7 @@ def CommanderPage():
         .mode-btn {
             flex: 1 1 0;
             min-width: 0 !important;
-            height: 34px !important;
+            height: 30px !important;
             border-radius: 9px !important;
             font-size: 14px !important;
             font-weight: 700 !important;
@@ -1520,16 +1494,15 @@ def CommanderPage():
             # ── [좌측 컬럼] 상단 패널 + 차트 영역 ──────────────────
             with solara.Div(style={
                 "grid-column": "1",
-                "grid-row": "1 / 3",
+                "grid-row": "1",
                 "display": "flex",
                 "flex-direction": "column",
-                "gap": "16px",
                 "min-height": "0"
             }):
                 # 상단 좌측 패널
-                with solara.Div(classes=["top-left-panel"], style={"width": "100%"}):
+                with solara.Div(classes=["top-left-panel"], style={"width": "100%", "height": "100%"}):
                     with solara.Div(classes=["top-user-row"]):
-                        solara.Button("HOME", on_click=go_home, classes=["back-btn"])
+                        solara.Button("HOME", on_click=go_home, classes=["home-btn"])
                         solara.Button("←", on_click=go_back, classes=["back-nav-btn"])
                         solara.Button(user_label, classes=["user-role-tab"])
                         solara.Button(
@@ -1602,37 +1575,37 @@ def CommanderPage():
                                         elif asset_tab == "3제대 기본자산":
                                             UnitAssetEditor("user3", "3제대 기본자산")
 
-                    with solara.Div(classes=["mission-chart-card"]):
-                        with solara.Div(classes=["chart-block"]):
-                            solara.Text("제대별 임무 성공률", classes=["chart-title"])
-                            solara.HTML(tag="div", unsafe_innerHTML=make_success_chart_svg())
+                    # with solara.Div(classes=["mission-chart-card"]):
+                    #     with solara.Div(classes=["chart-block"]):
+                    #         solara.Text("제대별 임무 성공률", classes=["chart-title"])
+                    #         solara.HTML(tag="div", unsafe_innerHTML=make_success_chart_svg())
 
-                        with solara.Div(classes=["chart-divider"]):
-                            pass
+                    #     with solara.Div(classes=["chart-divider"]):
+                    #         pass
 
-                        with solara.Div(classes=["chart-block"]):
-                            solara.Text("제대별 임무 위험률", classes=["chart-title"])
-                            solara.HTML(tag="div", unsafe_innerHTML=make_risk_chart_svg())
+                    #     with solara.Div(classes=["chart-block"]):
+                    #         solara.Text("제대별 임무 위험률", classes=["chart-title"])
+                    #         solara.HTML(tag="div", unsafe_innerHTML=make_risk_chart_svg())
 
-                    with solara.Div(classes=["control-btn-card"]):
-                        with solara.Div(classes=["control-btn-row"]):
-                            solara.Button(
-                                "실행",
-                                on_click=start_execution,
-                                classes=["run-btn", "btn-selected" if run_state == "run" else "btn-unselected"]
-                            )
-                            solara.Button(
-                                "종료",
-                                on_click=stop_execution,
-                                classes=["stop-btn", "btn-selected" if run_state == "stop" else "btn-unselected"]
-                            )
+                    # with solara.Div(classes=["control-btn-card"]):
+                    #     with solara.Div(classes=["control-btn-row"]):
+                    #         solara.Button(
+                    #             "실행",
+                    #             on_click=start_execution,
+                    #             classes=["run-btn", "btn-selected" if run_state == "run" else "btn-unselected"]
+                    #         )
+                    #         solara.Button(
+                    #             "종료",
+                    #             on_click=stop_execution,
+                    #             classes=["stop-btn", "btn-selected" if run_state == "stop" else "btn-unselected"]
+                    #         )
 
-                        solara.Button("임무 하달", on_click=deliver_mission, classes=["mission-delivery-btn"])
+                    #     solara.Button("임무 하달", on_click=deliver_mission, classes=["mission-delivery-btn"])
 
-            # ── [중앙 컬럼] 상단 테이블 + 센터 맵 ──────────
+            # 센터 상단 (운용정보 테이블만) — col 2, row 1
             with solara.Div(style={
                 "grid-column": "2",
-                "grid-row": "1 / 3",
+                "grid-row": "1",
                 "display": "flex",
                 "flex-direction": "column",
                 "min-height": "0"
@@ -1647,27 +1620,42 @@ def CommanderPage():
                             solara.Text("출발 예정 시각", classes=["summary-head-text"])
                         with solara.Div(classes=["col-time"]):
                             solara.Text("도착 예정 시각", classes=["summary-head-text"])
-                        with solara.Div(classes=["col-time"]):
-                            solara.Text("정찰 예정 시간", classes=["summary-head-text"])
 
                     for row in unit_info_rows:
                         with solara.Div(classes=["unit-summary-row"]):
                             with solara.Div(classes=["col-unit"]):
                                 solara.Text(row["unit"], classes=["summary-unit-text"])
+                            ugv_color_map = {
+                                "1제대": "rgba(249, 115, 22, 1)",
+                                "2제대": "rgba(34, 211, 238, 1)",
+                                "3제대": "rgba(244, 114, 182, 1)",
+                            }
                             with solara.Div(classes=["col-ugv"]):
-                                solara.HTML(tag="div", unsafe_innerHTML=f"<div class='ugv-badge'>{row['ugv']}</div>")
+                                color = ugv_color_map.get(row["unit"], "#e67e22")
+                                solara.HTML(
+                                    tag="div",
+                                    unsafe_innerHTML=f"<div style='width:30px;height:24px;border-radius:7px;background:{color};display:flex;align-items:center;justify-content:center;color:white;font-weight:800;font-size:14px;margin:0 auto;'>{row['ugv']}</div>"
+                                )
                             with solara.Div(classes=["col-time"]):
                                 solara.Text(row["depart"], classes=["summary-value-text"])
                             with solara.Div(classes=["col-time"]):
-                                solara.Text(row["arrive"], classes=["summary-value-text"])
-                            with solara.Div(classes=["col-time"]):
-                                solara.Text(str(row["recon"]), classes=["summary-value-text"])
+                                if row["unit"] == "3제대":
+                                    solara.Text(row["arrive"], style={"color": "#ef4444", "font-size": "13px", "font-weight": "600", "white-space": "nowrap", "text-align": "center", "width": "100%"})
+                                else:
+                                    solara.Text(row["arrive"], classes=["summary-value-text"])
 
+            # 센터 맵 — col 1~2 전체, row 2
+            with solara.Div(style={
+                "grid-column": "1 / 3",
+                "grid-row": "2",
+                "display": "flex",
+                "flex-direction": "column",
+                "min-height": "0"
+            }):
                 with solara.Div(classes=["center-map-area"], style={
                     "flex": "1",
                     "display": "flex",
                     "flex-direction": "column",
-                    "margin-top": "12px",
                     "min-height": "0"
                 }):
                     with solara.Div(classes=["center-map-inner"], style={
@@ -1685,7 +1673,7 @@ def CommanderPage():
                 "flex-direction": "column",
                 "min-height": "0"
             }):
-                solara.Text("Weather Risk Map", classes=["card-label"], style={"font-size": "18px", "margin-bottom": "15px"})
+                solara.Text("지상 작전 기상 위험도 - LTWR", classes=["card-label"], style={"font-size": "18px", "margin-bottom": "15px"})
                 with solara.Div(
                     classes=["ltwr-scroll-area"],
                     style={
@@ -1697,9 +1685,9 @@ def CommanderPage():
                         "padding-right": "4px"
                     }
                 ):
-                    MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
-                    MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
-                    MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
+                    MapCard(map_label_1, "map_01_Tactical_Weighted_Cost_1h.html", None)
+                    MapCard(map_label_2, "map_01_Tactical_Weighted_Cost_2h.html", None)
+                    MapCard(map_label_3, "map_01_Tactical_Weighted_Cost_3h.html", None)
 
 # ──────────────────────────────────────────────────────────────
 # [팀원 코드] 통제관 메인 페이지
@@ -2816,9 +2804,9 @@ def UserPage():
                         "padding-right": "4px",
                     },
                 ):
-                    MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
-                    MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
-                    MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
+                    MapCard(map_label_1, "map_01_Tactical_Weighted_Cost_1h.html", None)
+                    MapCard(map_label_2, "map_01_Tactical_Weighted_Cost_2h.html", None)
+                    MapCard(map_label_3, "map_01_Tactical_Weighted_Cost_3h.html", None)
 
 
 
@@ -2959,9 +2947,9 @@ def CommanderInputPage():
             # 우측: 입력 패널 (1~3제대 좌표 + 정찰시간)
             with solara.Div(classes=["commander-side-panel"]):
                 for (title, lat_v, set_lat, lng_v, set_lng, recon_v, set_recon) in [
-                    ("1제대 도착지 입력", unit1_lat, set_unit1_lat, unit1_lng, set_unit1_lng, unit1_recon, set_unit1_recon),
-                    ("2제대 도착지 입력", unit2_lat, set_unit2_lat, unit2_lng, set_unit2_lng, unit2_recon, set_unit2_recon),
-                    ("3제대 도착지 입력", unit3_lat, set_unit3_lat, unit3_lng, set_unit3_lng, unit3_recon, set_unit3_recon),
+                    ("도착지1 입력", unit1_lat, set_unit1_lat, unit1_lng, set_unit1_lng, unit1_recon, set_unit1_recon),
+                    ("도착지2 입력", unit2_lat, set_unit2_lat, unit2_lng, set_unit2_lng, unit2_recon, set_unit2_recon),
+                    ("도착지3 입력", unit3_lat, set_unit3_lat, unit3_lng, set_unit3_lng, unit3_recon, set_unit3_recon),
                 ]:
                     with solara.Div(classes=["commander-section-card"]):
                         solara.HTML(tag="div", unsafe_innerHTML=f"<div class='commander-section-title'>{title}</div>")
@@ -3002,6 +2990,12 @@ def LoadingPage():
         rid = active_run_id.value
         if rid:
             ws_client.start_live_updates(rid)
+            
+    def auto_redirect():
+        time.sleep(5)
+        go_to_commander_page()
+
+    solara.use_thread(auto_redirect, dependencies=[])    
 
     solara.Style("""
         html, body, #app, .v-application, .v-application__wrap,

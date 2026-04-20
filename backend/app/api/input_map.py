@@ -18,7 +18,6 @@ import io
 import logging
 from functools import lru_cache
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter
@@ -44,7 +43,7 @@ _LC_COLORS_RGBA: dict[int, tuple[int, int, int, int]] = {
 
 # ── 인메모리 상태 ─────────────────────────────────────────
 _marker_seq: int = 0
-_last_marker_client_seq: int = 0
+_last_marker_client_seq_by_client: dict[str, int] = {}
 _markers: list = []        # [{id, unit, lat, lng, type}]
 
 _click_seq: int = 0
@@ -177,15 +176,6 @@ def _build_input_map_html(backend_url: str | None = None) -> str:
   .leaflet-popup-tip-container {{ display: none !important; }}
   .leaflet-popup-content {{ margin: 0 !important; }}
 
-  .map-badge {{
-    background: rgba(15, 23, 42, 0.88);
-    color: #e2e8f0;
-    border: 1px solid rgba(148,163,184,0.18);
-    border-radius: 10px;
-    padding: 8px 12px;
-    font: 600 12px/1.45 'Segoe UI', sans-serif;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.28);
-  }}
 </style>
 </head>
 <body>
@@ -223,14 +213,6 @@ def _build_input_map_html(backend_url: str | None = None) -> str:
   }}).addTo(map);
 
   map.fitBounds(BOUNDS, {{padding:[8,8]}});
-
-  var badge = L.control({{position: 'bottomleft'}});
-  badge.onAdd = function() {{
-    var div = L.DomUtil.create('div', 'map-badge');
-    div.innerHTML = '<b>작전 지역</b><br>backend/data/map/static parquet';
-    return div;
-  }};
-  badge.addTo(map);
 
   function makePinIcon(fillColor) {{
     var svg =
@@ -369,6 +351,7 @@ class MarkerItem(BaseModel):
 
 class MarkersPayload(BaseModel):
     seq: int | None = None
+    client_id: str | None = None
     markers: list[MarkerItem]
 
 
@@ -379,13 +362,15 @@ async def get_markers():
 
 @router.post("/markers", summary="마커 업데이트 (Solara → 지도)")
 async def set_markers(payload: MarkersPayload):
-    global _marker_seq, _markers, _last_marker_client_seq
+    global _marker_seq, _markers, _last_marker_client_seq_by_client
+    client_id = payload.client_id or "default"
     client_seq = payload.seq or 0
-    if client_seq and client_seq < _last_marker_client_seq:
+    last_client_seq = _last_marker_client_seq_by_client.get(client_id, 0)
+    if client_seq and client_seq < last_client_seq:
         return {"ok": True, "seq": _marker_seq, "ignored": True}
 
     if client_seq:
-        _last_marker_client_seq = client_seq
+        _last_marker_client_seq_by_client[client_id] = client_seq
     _marker_seq += 1
     next_markers = []
     for index, marker in enumerate(payload.markers, start=1):
@@ -403,6 +388,17 @@ async def set_markers(payload: MarkersPayload):
         })
     _markers = next_markers
     return {"ok": True, "seq": _marker_seq}
+
+
+@router.post("/reset", summary="입력 지도 임시 상태 초기화")
+async def reset_input_map_state():
+    global _marker_seq, _markers, _click_seq, _pending_clicks, _last_marker_client_seq_by_client
+    _marker_seq = 0
+    _markers = []
+    _click_seq = 0
+    _pending_clicks = []
+    _last_marker_client_seq_by_client = {}
+    return {"ok": True}
 
 
 # ── 클릭 이벤트 API ───────────────────────────────────────

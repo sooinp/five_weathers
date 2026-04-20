@@ -10,10 +10,13 @@ frontend/components/pages.py
 """
 
 import asyncio
+import json
 import os
 import threading
 import time
+import uuid
 import solara
+from solara.toestand import Ref
 from datetime import datetime, timedelta
 from components.grid_view import GridView
 from components.cards import LtwrMapPanel
@@ -163,73 +166,75 @@ mission_delivery_data = solara.reactive({
 # ──────────────────────────────────────────────────────────────
 @solara.component
 def BaseAssetEditor():
-    total_units, set_total_units = solara.use_state("")
-    total_controllers, set_total_controllers = solara.use_state("")
-    total_ugv, set_total_ugv = solara.use_state("")
-    lost_ugv, set_lost_ugv = solara.use_state("")
-    dep_lat, set_dep_lat = solara.use_state("")
-    dep_lon, set_dep_lon = solara.use_state("")
-
-    def _sync():
-        d = asset_data.value["base"]
-        set_total_units(str(d["total_units"]))
-        set_total_controllers(str(d["total_controllers"]))
-        set_total_ugv(str(d["total_ugv"]))
-        set_lost_ugv(str(d["lost_ugv"]))
-        set_dep_lat(str(d.get("departure_lat", "")))
-        set_dep_lon(str(d.get("departure_lon", "")))
-
-    solara.use_effect(_sync, [])
+    form = solara.use_reactive(base_asset_snapshot())
 
     def save_base_asset():
         updated = dict(asset_data.value)
         updated_base = dict(updated["base"])
-        updated_base["total_units"] = total_units
-        updated_base["total_controllers"] = total_controllers
-        updated_base["total_ugv"] = total_ugv
-        updated_base["lost_ugv"] = lost_ugv
-        updated_base["departure_lat"] = dep_lat
-        updated_base["departure_lon"] = dep_lon
+        updated_base["total_units"] = form.value["total_units"]
+        updated_base["total_controllers"] = form.value["total_controllers"]
+        updated_base["total_ugv"] = form.value["total_ugv"]
+        updated_base["lost_ugv"] = form.value["lost_ugv"]
+        updated_base["departure_lat"] = form.value["departure_lat"]
+        updated_base["departure_lon"] = form.value["departure_lon"]
         updated["base"] = updated_base
         asset_data.value = updated
 
     def reset_base_asset():
-        latest = asset_data.value["base"]
-        set_total_units(str(latest["total_units"]))
-        set_total_controllers(str(latest["total_controllers"]))
-        set_total_ugv(str(latest["total_ugv"]))
-        set_lost_ugv(str(latest["lost_ugv"]))
-        set_dep_lat(str(latest.get("departure_lat", "")))
-        set_dep_lon(str(latest.get("departure_lon", "")))
+        form.set(base_asset_snapshot())
 
     with solara.Div(classes=["asset-form-card"]):
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 제대 수", classes=["asset-form-label"])
-            solara.InputText("", value=total_units, on_value=set_total_units)
+            solara.InputText("", value=Ref(form.fields["total_units"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 통제관 수", classes=["asset-form-label"])
-            solara.InputText("", value=total_controllers, on_value=set_total_controllers)
+            solara.InputText("", value=Ref(form.fields["total_controllers"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 정찰 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=total_ugv, on_value=set_total_ugv)
+            solara.InputText("", value=Ref(form.fields["total_ugv"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 손실 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=lost_ugv, on_value=set_lost_ugv)
+            solara.InputText("", value=Ref(form.fields["lost_ugv"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("출발지 위도", classes=["asset-form-label"])
-            solara.InputText("", value=dep_lat, on_value=set_dep_lat)
+            solara.InputText("", value=Ref(form.fields["departure_lat"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("출발지 경도", classes=["asset-form-label"])
-            solara.InputText("", value=dep_lon, on_value=set_dep_lon)
+            solara.InputText("", value=Ref(form.fields["departure_lon"]))
 
         with solara.Div(classes=["asset-form-action-row"]):
             solara.Button("저장", on_click=save_base_asset, classes=["asset-save-btn"])
             solara.Button("취소", on_click=reset_base_asset, classes=["asset-cancel-btn"])
+
+
+def base_asset_snapshot():
+    data = asset_data.value["base"]
+    return {
+        "total_units": str(data["total_units"]),
+        "total_controllers": str(data["total_controllers"]),
+        "total_ugv": str(data["total_ugv"]),
+        "lost_ugv": str(data["lost_ugv"]),
+        "departure_lat": str(data.get("departure_lat", "")),
+        "departure_lon": str(data.get("departure_lon", "")),
+    }
+
+
+def unit_asset_snapshot(unit_key: str):
+    data = asset_data.value[unit_key]
+    return {
+        "controllers": str(data["controllers"]),
+        "total_ugv": str(data["total_ugv"]),
+        "lost_ugv": str(data["lost_ugv"]),
+        "available_ugv": str(data["available_ugv"]),
+        "target_lat": str(data["target_lat"]),
+        "target_lon": str(data["target_lon"]),
+    }
 
 
 # ──────────────────────────────────────────────────────────────
@@ -237,74 +242,124 @@ def BaseAssetEditor():
 # ──────────────────────────────────────────────────────────────
 @solara.component
 def UnitAssetEditor(unit_key: str, title: str):
-    controllers, set_controllers = solara.use_state("")
-    total_ugv, set_total_ugv = solara.use_state("")
-    lost_ugv, set_lost_ugv = solara.use_state("")
-    available_ugv, set_available_ugv = solara.use_state("")
-    target_lat, set_target_lat = solara.use_state("")
-    target_lon, set_target_lon = solara.use_state("")
+    form = solara.use_reactive(unit_asset_snapshot(unit_key))
 
-    # unit_key가 바뀔 때(탭 전환)마다 asset_data에서 값 재동기화
-    def _sync():
-        d = asset_data.value[unit_key]
-        set_controllers(str(d["controllers"]))
-        set_total_ugv(str(d["total_ugv"]))
-        set_lost_ugv(str(d["lost_ugv"]))
-        set_available_ugv(str(d["available_ugv"]))
-        set_target_lat(str(d["target_lat"]))
-        set_target_lon(str(d["target_lon"]))
+    def sync_form():
+        form.set(unit_asset_snapshot(unit_key))
 
-    solara.use_effect(_sync, [unit_key])
+    solara.use_effect(sync_form, [unit_key])
 
     def save_unit_asset():
         updated = dict(asset_data.value)
         updated_unit = dict(updated[unit_key])
-        updated_unit["controllers"] = controllers
-        updated_unit["total_ugv"] = total_ugv
-        updated_unit["lost_ugv"] = lost_ugv
-        updated_unit["available_ugv"] = available_ugv
-        updated_unit["target_lat"] = target_lat
-        updated_unit["target_lon"] = target_lon
+        updated_unit["controllers"] = form.value["controllers"]
+        updated_unit["total_ugv"] = form.value["total_ugv"]
+        updated_unit["lost_ugv"] = form.value["lost_ugv"]
+        updated_unit["available_ugv"] = form.value["available_ugv"]
+        updated_unit["target_lat"] = form.value["target_lat"]
+        updated_unit["target_lon"] = form.value["target_lon"]
         updated[unit_key] = updated_unit
         asset_data.value = updated
 
     def reset_unit_asset():
-        latest = asset_data.value[unit_key]
-        set_controllers(str(latest["controllers"]))
-        set_total_ugv(str(latest["total_ugv"]))
-        set_lost_ugv(str(latest["lost_ugv"]))
-        set_available_ugv(str(latest["available_ugv"]))
-        set_target_lat(str(latest["target_lat"]))
-        set_target_lon(str(latest["target_lon"]))
+        form.set(unit_asset_snapshot(unit_key))
 
     with solara.Div(classes=["asset-form-card"]):
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("통제관 수", classes=["asset-form-label"])
-            solara.InputText("", value=controllers, on_value=set_controllers)
+            solara.InputText("", value=Ref(form.fields["controllers"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 정찰 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=total_ugv, on_value=set_total_ugv)
+            solara.InputText("", value=Ref(form.fields["total_ugv"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("손실 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=lost_ugv, on_value=set_lost_ugv)
+            solara.InputText("", value=Ref(form.fields["lost_ugv"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("운용 가능 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=available_ugv, on_value=set_available_ugv)
+            solara.InputText("", value=Ref(form.fields["available_ugv"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("목표 위도", classes=["asset-form-label"])
-            solara.InputText("", value=target_lat, on_value=set_target_lat)
+            solara.InputText("", value=Ref(form.fields["target_lat"]))
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("목표 경도", classes=["asset-form-label"])
-            solara.InputText("", value=target_lon, on_value=set_target_lon)
+            solara.InputText("", value=Ref(form.fields["target_lon"]))
 
         with solara.Div(classes=["asset-form-action-row"]):
             solara.Button("저장", on_click=save_unit_asset, classes=["asset-save-btn"])
             solara.Button("취소", on_click=reset_unit_asset, classes=["asset-cancel-btn"])
+
+
+@solara.component
+def CommanderAssetPopupPanel(on_close):
+    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
+
+    with solara.Div(classes=["asset-popup-panel"]):
+        with solara.Div(classes=["asset-popup-header"]):
+            solara.Text("기본자산", classes=["asset-popup-title"])
+            solara.Button("X", on_click=on_close, classes=["asset-popup-close-btn"])
+
+        with solara.Div(classes=["asset-popup-body"]):
+            with solara.Div(classes=["asset-tab-col"]):
+                for tab_name, label in [
+                    ("부대 기본자산", "부대"),
+                    ("1제대 기본자산", "1제대"),
+                    ("2제대 기본자산", "2제대"),
+                    ("3제대 기본자산", "3제대"),
+                ]:
+                    solara.Button(
+                        label,
+                        on_click=lambda t=tab_name: set_asset_tab(t),
+                        classes=[
+                            "asset-tab-btn2",
+                            "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
+                        ],
+                    )
+
+            with solara.Div(classes=["asset-tab-content"]):
+                if asset_tab == "부대 기본자산":
+                    BaseAssetEditor()
+                elif asset_tab == "1제대 기본자산":
+                    UnitAssetEditor("user1", "1제대 기본자산")
+                elif asset_tab == "2제대 기본자산":
+                    UnitAssetEditor("user2", "2제대 기본자산")
+                elif asset_tab == "3제대 기본자산":
+                    UnitAssetEditor("user3", "3제대 기본자산")
+
+
+@solara.component
+def UserAssetPopupPanel(current_user: str, my_unit_label: str, on_close):
+    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
+
+    with solara.Div(classes=["asset-popup-panel"]):
+        with solara.Div(classes=["asset-popup-header"]):
+            solara.Text("기본자산", classes=["asset-popup-title"])
+            solara.Button("X", on_click=on_close, classes=["asset-popup-close-btn"])
+
+        with solara.Div(classes=["asset-popup-body"]):
+            with solara.Div(classes=["asset-tab-col"]):
+                for tab_name, label in [
+                    ("부대 기본자산", "부대"),
+                    (f"{my_unit_label} 기본자산", my_unit_label),
+                ]:
+                    solara.Button(
+                        label,
+                        on_click=lambda t=tab_name: set_asset_tab(t),
+                        classes=[
+                            "asset-tab-btn2",
+                            "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
+                        ],
+                    )
+
+            with solara.Div(classes=["asset-tab-content"]):
+                if asset_tab == "부대 기본자산":
+                    BaseAssetEditor()
+                else:
+                    UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -675,7 +730,6 @@ def CommanderPage():
 
     run_state, set_run_state = solara.use_state("")
     show_asset_popup, set_show_asset_popup = solara.use_state(False)
-    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
     toast_count, set_toast_count = solara.use_state(0)
 
     def start_execution():
@@ -880,6 +934,7 @@ def CommanderPage():
             min-width: 0; min-height: 0; height: 100%;
             display: flex; flex-direction: column;
             gap: 12px; overflow: hidden;
+            position: relative;
         }
 
         .sub-inner-card {
@@ -1024,6 +1079,12 @@ def CommanderPage():
             box-sizing: border-box; overflow: hidden;
         }
 
+        .asset-popup-left-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 25;
+        }
+
         .asset-popup-header {
             display: flex; align-items: center; justify-content: space-between;
             margin-bottom: 10px; padding: 0 4px; flex-shrink: 0;
@@ -1063,6 +1124,7 @@ def CommanderPage():
         .asset-tab-content {
             flex: 1; min-height: 0; height: 100%;
             overflow-y: auto; padding-right: 4px;
+            position: relative; z-index: 1;
         }
 
         .asset-form-card {
@@ -1070,23 +1132,26 @@ def CommanderPage():
             border: 1px solid rgba(148, 163, 184, 0.12);
             border-radius: 14px; padding: 14px 12px;
             display: flex; flex-direction: column;
-            justify-content: flex-start; gap: 10px; height: 100%;
+            justify-content: flex-start; gap: 12px;
+            min-height: 100%; height: auto;
+            position: relative; z-index: 2;
         }
 
         .asset-form-title { color: #e5e7eb !important; font-size: 15px !important; font-weight: 800 !important; margin-bottom: 4px; }
 
         .asset-form-row {
-            display: grid; grid-template-columns: 130px 1fr;
-            align-items: center; gap: 12px; min-height: 56px;
+            display: flex; flex-direction: column;
+            align-items: stretch; gap: 6px; min-height: auto;
         }
 
         .asset-form-label {
-            color: #d1d5db !important; font-size: 14px !important;
-            font-weight: 700 !important; line-height: 1;
-            display: flex; align-items: center; height: 100%;
+            color: #d1d5db !important; font-size: 11px !important;
+            font-weight: 700 !important; line-height: 1.3;
+            display: block; min-height: 0;
+            position: relative; z-index: 3;
         }
 
-        .asset-form-action-row { display: flex; gap: 10px; margin-top: auto; }
+        .asset-form-action-row { display: flex; gap: 10px; margin-top: auto; position: relative; z-index: 3; }
 
         .asset-save-btn {
             flex: 1; height: 38px !important; border-radius: 8px !important;
@@ -1105,12 +1170,14 @@ def CommanderPage():
         .asset-form-card .v-input {
             margin-top: 0 !important; padding-top: 0 !important;
             display: flex !important; align-items: center !important;
+            width: 100% !important;
+            position: relative !important; z-index: 3 !important;
         }
         .asset-form-card .v-input__control { min-height: 44px !important; }
         .asset-form-card .v-input__slot,
         .asset-form-card .v-text-field > .v-input__control > .v-input__slot {
             min-height: 44px !important; display: flex !important;
-            align-items: center !important; padding: 0 10px !important;
+            align-items: center !important; padding: 0 !important;
         }
     """)
 
@@ -1182,6 +1249,10 @@ def CommanderPage():
             # ── 하단 본문 ────────────────────────────────────────
             with solara.Div(classes=["content-grid-left"]):
                 with solara.Div(classes=["left-sub-sidebar"]):
+                    if show_asset_popup:
+                        with solara.Div(classes=["asset-popup-left-overlay"]):
+                            CommanderAssetPopupPanel(lambda: set_show_asset_popup(False))
+
                     # 임무 성공률 / 위험률 SVG 차트
                     with solara.Div(classes=["mission-chart-card"]):
                         with solara.Div(classes=["chart-block"]):
@@ -1219,55 +1290,16 @@ def CommanderPage():
 
             # ── 우측 사이드바: 자산 팝업 or LTWR 맵 ─────────────
             with solara.Div(classes=["right-sidebar-area"]):
-                if show_asset_popup:
-                    with solara.Div(classes=["asset-popup-panel"]):
-                        with solara.Div(classes=["asset-popup-header"]):
-                            solara.Text("기본자산", classes=["asset-popup-title"])
-                            solara.Button(
-                                "✕",
-                                on_click=lambda: set_show_asset_popup(False),
-                                classes=["asset-popup-close-btn"],
-                            )
-
-                        with solara.Div(classes=["asset-popup-body"]):
-                            # 좌측: 탭 버튼 컬럼
-                            with solara.Div(classes=["asset-tab-col"]):
-                                for tab_name, label in [
-                                    ("부대 기본자산", "부대"),
-                                    ("1제대 기본자산", "1제대"),
-                                    ("2제대 기본자산", "2제대"),
-                                    ("3제대 기본자산", "3제대"),
-                                ]:
-                                    solara.Button(
-                                        label,
-                                        on_click=lambda t=tab_name: set_asset_tab(t),
-                                        classes=[
-                                            "asset-tab-btn2",
-                                            "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
-                                        ],
-                                    )
-
-                            # 우측: 컨텐츠
-                            with solara.Div(classes=["asset-tab-content"]):
-                                if asset_tab == "부대 기본자산":
-                                    BaseAssetEditor()
-                                elif asset_tab == "1제대 기본자산":
-                                    UnitAssetEditor("user1", "1제대 기본자산")
-                                elif asset_tab == "2제대 기본자산":
-                                    UnitAssetEditor("user2", "2제대 기본자산")
-                                elif asset_tab == "3제대 기본자산":
-                                    UnitAssetEditor("user3", "3제대 기본자산")
-                else:
-                    solara.HTML(tag="div", unsafe_innerHTML=(
-                        "<div class='card-label' style='font-size:18px;margin-bottom:15px;'>"
-                        "육군기상작전위험도"
-                        "<span style='font-size:15px;'>LTWR</span>"
-                        " 현황"
-                        "</div>"
-                    ))
-                    MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
-                    MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
-                    MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
+                solara.HTML(tag="div", unsafe_innerHTML=(
+                    "<div class='card-label' style='font-size:18px;margin-bottom:15px;'>"
+                    "육군기상작전위험도"
+                    "<span style='font-size:15px;'>LTWR</span>"
+                    " 현황"
+                    "</div>"
+                ))
+                MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
+                MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
+                MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1287,7 +1319,6 @@ def UserPage():
 
     run_state, set_run_state = solara.use_state("")
     show_asset_popup, set_show_asset_popup = solara.use_state(False)
-    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
 
     def start_execution():
         set_run_state("run")
@@ -1443,6 +1474,7 @@ def UserPage():
             min-width: 0; min-height: 0; height: 100%;
             display: flex; flex-direction: column;
             gap: 12px; overflow: hidden;
+            position: relative;
         }
 
         .sub-inner-card {
@@ -1573,6 +1605,12 @@ def UserPage():
             box-sizing: border-box; overflow: hidden;
         }
 
+        .asset-popup-left-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 25;
+        }
+
         .asset-popup-header {
             display: flex; align-items: center; justify-content: space-between;
             margin-bottom: 10px; padding: 0 4px; flex-shrink: 0;
@@ -1612,6 +1650,7 @@ def UserPage():
         .asset-tab-content {
             flex: 1; min-height: 0; height: 100%;
             overflow-y: auto; padding-right: 4px;
+            position: relative; z-index: 1;
         }
 
         .asset-form-card {
@@ -1619,23 +1658,26 @@ def UserPage():
             border: 1px solid rgba(148, 163, 184, 0.12);
             border-radius: 14px; padding: 14px 12px;
             display: flex; flex-direction: column;
-            justify-content: flex-start; gap: 10px; height: 100%;
+            justify-content: flex-start; gap: 12px;
+            min-height: 100%; height: auto;
+            position: relative; z-index: 2;
         }
 
         .asset-form-title { color: #e5e7eb !important; font-size: 15px !important; font-weight: 800 !important; margin-bottom: 4px; }
 
         .asset-form-row {
-            display: grid; grid-template-columns: 130px 1fr;
-            align-items: center; gap: 12px; min-height: 56px;
+            display: flex; flex-direction: column;
+            align-items: stretch; gap: 6px; min-height: auto;
         }
 
         .asset-form-label {
-            color: #d1d5db !important; font-size: 14px !important;
-            font-weight: 700 !important; line-height: 1;
-            display: flex; align-items: center; height: 100%;
+            color: #d1d5db !important; font-size: 11px !important;
+            font-weight: 700 !important; line-height: 1.3;
+            display: block; min-height: 0;
+            position: relative; z-index: 3;
         }
 
-        .asset-form-action-row { display: flex; gap: 10px; margin-top: auto; }
+        .asset-form-action-row { display: flex; gap: 10px; margin-top: auto; position: relative; z-index: 3; }
 
         .asset-save-btn {
             flex: 1; height: 38px !important; border-radius: 8px !important;
@@ -1654,12 +1696,14 @@ def UserPage():
         .asset-form-card .v-input {
             margin-top: 0 !important; padding-top: 0 !important;
             display: flex !important; align-items: center !important;
+            width: 100% !important;
+            position: relative !important; z-index: 3 !important;
         }
         .asset-form-card .v-input__control { min-height: 44px !important; }
         .asset-form-card .v-input__slot,
         .asset-form-card .v-text-field > .v-input__control > .v-input__slot {
             min-height: 44px !important; display: flex !important;
-            align-items: center !important; padding: 0 10px !important;
+            align-items: center !important; padding: 0 !important;
         }
     """)
 
@@ -1715,6 +1759,10 @@ def UserPage():
             # ── 하단 본문 ────────────────────────────────────────
             with solara.Div(classes=["content-grid-left"]):
                 with solara.Div(classes=["left-sub-sidebar"]):
+                    if show_asset_popup:
+                        with solara.Div(classes=["asset-popup-left-overlay"]):
+                            UserAssetPopupPanel(current_user, my_unit_label, lambda: set_show_asset_popup(False))
+
                     # 임무 성공률 / 위험률 지표 카드 (unit_kpi_data 에서 읽어 지휘관 차트와 동기화)
                     _my_kpi = unit_kpi_data.value.get(current_user, {"success": 0, "risk": 0})
                     with solara.Div(classes=["metric-card"]):
@@ -1751,49 +1799,16 @@ def UserPage():
 
             # ── 우측 사이드바: 자산 패널 or LTWR 맵 ─────────────
             with solara.Div(classes=["right-sidebar-area"]):
-                if show_asset_popup:
-                    with solara.Div(classes=["asset-popup-panel"]):
-                        with solara.Div(classes=["asset-popup-header"]):
-                            solara.Text("기본자산", classes=["asset-popup-title"])
-                            solara.Button(
-                                "✕",
-                                on_click=lambda: set_show_asset_popup(False),
-                                classes=["asset-popup-close-btn"],
-                            )
-
-                        with solara.Div(classes=["asset-popup-body"]):
-                            # 좌측: 탭 버튼 — 부대 + 자기 제대 2개만
-                            with solara.Div(classes=["asset-tab-col"]):
-                                for tab_name, label in [
-                                    ("부대 기본자산", "부대"),
-                                    (f"{my_unit_label} 기본자산", my_unit_label),
-                                ]:
-                                    solara.Button(
-                                        label,
-                                        on_click=lambda t=tab_name: set_asset_tab(t),
-                                        classes=[
-                                            "asset-tab-btn2",
-                                            "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
-                                        ],
-                                    )
-
-                            # 우측: 컨텐츠
-                            with solara.Div(classes=["asset-tab-content"]):
-                                if asset_tab == "부대 기본자산":
-                                    BaseAssetEditor()
-                                else:
-                                    UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
-                else:
-                    solara.HTML(tag="div", unsafe_innerHTML=(
-                        "<div class='card-label' style='font-size:18px;margin-bottom:15px;'>"
-                        "육군기상작전위험도"
-                        "<span style='font-size:15px;'>LTWR</span>"
-                        " 현황"
-                        "</div>"
-                    ))
-                    MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
-                    MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
-                    MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
+                solara.HTML(tag="div", unsafe_innerHTML=(
+                    "<div class='card-label' style='font-size:18px;margin-bottom:15px;'>"
+                    "육군기상작전위험도"
+                    "<span style='font-size:15px;'>LTWR</span>"
+                    " 현황"
+                    "</div>"
+                ))
+                MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
+                MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
+                MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1802,6 +1817,7 @@ def UserPage():
 # ──────────────────────────────────────────────────────────────
 @solara.component
 def CommanderInputPage():
+    marker_client_id, _ = solara.use_state(uuid.uuid4().hex)
     mission_inputs = solara.use_reactive({
         "departure": {"lat": "", "lng": ""},
         "targets": [
@@ -1827,6 +1843,12 @@ def CommanderInputPage():
             return int(hour) * 3600 + int(minute) * 60 + int(second)
         except Exception:
             return 1800
+
+    def snapshot_state(state):
+        return {
+            "departure": dict(state["departure"]),
+            "targets": [dict(target) for target in state["targets"]],
+        }
 
     def build_markers_payload(state, seq):
         markers = []
@@ -1857,7 +1879,7 @@ def CommanderInputPage():
                     })
             except (KeyError, TypeError, ValueError):
                 continue
-        return {"seq": seq, "markers": markers}
+        return {"seq": seq, "client_id": marker_client_id, "markers": markers}
 
     def push_markers(state, seq):
         import requests as _req
@@ -1871,12 +1893,14 @@ def CommanderInputPage():
         except Exception:
             pass
 
-    def apply_inputs(next_state, *, sync_markers=True):
+    def queue_marker_push(state):
+        marker_push_seq.value += 1
+        seq = marker_push_seq.value
+        state_snapshot = snapshot_state(state)
+        threading.Thread(target=push_markers, args=(state_snapshot, seq), daemon=True).start()
+
+    def apply_inputs(next_state):
         mission_inputs.set(next_state)
-        if sync_markers:
-            marker_push_seq.value += 1
-            seq = marker_push_seq.value
-            threading.Thread(target=push_markers, args=(next_state, seq), daemon=True).start()
 
     def update_departure(field, value):
         current = mission_inputs.value
@@ -1928,6 +1952,16 @@ def CommanderInputPage():
         return updated_assets
 
     def load_initial_inputs():
+        import requests as _req
+
+        try:
+            _req.post(
+                f"{BACKEND_HTTP_BASE}/api/map/input/reset",
+                timeout=2,
+            )
+        except Exception:
+            pass
+
         base = asset_data.value.get("base", {})
         recon_times = mission_settings.value.get("recon_times", {})
         initial_state = {
@@ -1944,9 +1978,18 @@ def CommanderInputPage():
                 for index in range(1, 4)
             ],
         }
+        last_click_seq.value = 0
         apply_inputs(initial_state)
 
     solara.use_effect(load_initial_inputs, [])
+
+    def sync_markers_effect():
+        queue_marker_push(mission_inputs.value)
+
+    solara.use_effect(
+        sync_markers_effect,
+        [json.dumps(mission_inputs.value, sort_keys=True)],
+    )
 
     @solara.lab.use_task
     async def poll_map_click():
@@ -2208,10 +2251,10 @@ def CommanderInputPage():
                     with solara.Div(classes=["commander-input-group"]):
                         with solara.Div(classes=["commander-field-row"]):
                             solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc704\ub3c4</div>")
-                            solara.InputText("", value=mission_inputs.value["departure"]["lat"], on_value=lambda value: update_departure("lat", value), continuous_update=True)
+                            solara.InputText("", value=Ref(mission_inputs.fields["departure"]["lat"]), continuous_update=True)
                         with solara.Div(classes=["commander-field-row"]):
                             solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uacbd\ub3c4</div>")
-                            solara.InputText("", value=mission_inputs.value["departure"]["lng"], on_value=lambda value: update_departure("lng", value), continuous_update=True)
+                            solara.InputText("", value=Ref(mission_inputs.fields["departure"]["lng"]), continuous_update=True)
 
                 for index, title in enumerate([
                     "1\uc81c\ub300 \ub3c4\ucc29\uc9c0 \uc785\ub825",
@@ -2223,13 +2266,13 @@ def CommanderInputPage():
                         with solara.Div(classes=["commander-input-group"]):
                             with solara.Div(classes=["commander-field-row"]):
                                 solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc704\ub3c4</div>")
-                                solara.InputText("", value=mission_inputs.value["targets"][index]["lat"], on_value=lambda value, target_index=index: update_target(target_index, "lat", value), continuous_update=True)
+                                solara.InputText("", value=Ref(mission_inputs.fields["targets"][index]["lat"]), continuous_update=True)
                             with solara.Div(classes=["commander-field-row"]):
                                 solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uacbd\ub3c4</div>")
-                                solara.InputText("", value=mission_inputs.value["targets"][index]["lng"], on_value=lambda value, target_index=index: update_target(target_index, "lng", value), continuous_update=True)
+                                solara.InputText("", value=Ref(mission_inputs.fields["targets"][index]["lng"]), continuous_update=True)
                             with solara.Div(classes=["commander-field-row"]):
                                 solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc815\ucc30\uc2dc\uac04</div>")
-                                solara.InputText("", value=mission_inputs.value["targets"][index]["patrol_time"], on_value=lambda value, target_index=index: update_target(target_index, "patrol_time", value))
+                                solara.InputText("", value=Ref(mission_inputs.fields["targets"][index]["patrol_time"]))
 
                 with solara.Div(classes=["commander-submit-wrap"]):
                     solara.Button(

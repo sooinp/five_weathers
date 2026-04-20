@@ -124,7 +124,7 @@ def MapView():
     tif_layers = []
     if state.latest_result.value and state.latest_result.value.get("tif_paths"):
         import os
-        backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+        backend_url = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
         bounds_default = [[37.0, 127.0], [38.0, 128.0]]  # 실제 범위로 교체 필요
         for tif_key, tif_path in state.latest_result.value["tif_paths"].items():
             # 백엔드 StaticFiles URL: /tif-files/<파일명>

@@ -27,10 +27,8 @@ from services.api_client import (
 )
 
 from components.state import (
-    timer_running,
-    timer_end_ts,
     remaining_time_text_global,
-    timer_remaining_secs,
+    video_reload_nonce,
     video_should_play,
 )
 
@@ -44,8 +42,6 @@ def GridView():
 
     # 팀원 코드: 시간 표시 상태
     current_time_text = solara.use_reactive(time.strftime("%Y.%m.%d %H:%M"))
-    remaining_display = solara.use_reactive(remaining_time_text_global.value)
-
     # 백엔드 상태 (비동기로 체크 — 렌더 블로킹 없음)
     backend_alive   = solara.use_reactive(True)
     sim_available   = solara.use_reactive(False)
@@ -67,28 +63,6 @@ def GridView():
                 if elapsed >= 10.0:
                     is_active.value = True
                     last_toggle_time.value = current_now
-
-    # 임무 타이머 카운트다운 (0.5초마다 10분 감산 — 7초=14틱에 02:20:00→00:00:00)
-    @solara.lab.use_task
-    async def clock_loop():
-        while True:
-            if timer_running.value and timer_end_ts.value is not None:
-                secs = timer_remaining_secs.value - 600  # 10분 감산
-                if secs <= 0:
-                    remaining_time_text_global.value = "00:00:00"
-                    remaining_display.value = "00:00:00"
-                    timer_running.value = False
-                    timer_end_ts.value = None
-                    timer_remaining_secs.value = 0
-                else:
-                    timer_remaining_secs.value = secs
-                    h = secs // 3600
-                    m = (secs % 3600) // 60
-                    txt = f"{h:02d}:{m:02d}:00"
-                    remaining_time_text_global.value = txt
-                    remaining_display.value = txt
-
-            await asyncio.sleep(0.5)
 
     # 백엔드 헬스체크 + sim/video status — 5초마다 비동기로 확인 (렌더 블로킹 없음)
     @solara.lab.use_task
@@ -292,7 +266,7 @@ def GridView():
 
         # 1) 상단 탭 줄
         with solara.Div(classes=["map-top-controls"]):
-            for m in ["위험도", "기동성", "센서"]:
+            for m in ["종합상황도", "기동기반", "센서기반"]:
                 solara.Button(
                     m,
                     on_click=lambda x=m: set_map_selection(x),
@@ -320,7 +294,7 @@ def GridView():
                 solara.HTML(
                     tag="iframe",
                     attributes={
-                        "src": f"{BACKEND_HTTP_BASE}/sim-videos/player.html?play={_play_param}",
+                        "src": f"{BACKEND_HTTP_BASE}/sim-videos/player.html?play={_play_param}&run={video_reload_nonce.value}",
                         "style": "position:absolute; top:0; left:0; width:100%; height:100%; border:none;",
                         "allow": "autoplay",
                     },
@@ -336,7 +310,7 @@ def GridView():
                 )
             elif backend_alive.value:
                 # 백엔드 살아있음 → 그리드 맵
-                _layer_key = {"위험도": "risk", "기동성": "mobility", "센서": "sensor"}.get(
+                _layer_key = {"종합상황도": "risk", "기동기반": "mobility", "센서기반": "sensor"}.get(
                     map_selection.value, "risk"
                 )
                 solara.HTML(
@@ -398,7 +372,7 @@ def GridView():
 
                 with solara.Div(classes=["legend-item"]):
                     solara.Text("●", style={"color": "#cbd5e1", "font-size": "14px"})
-                    solara.Text("유인기")
+                    solara.Text("통제관")
 
                 num_ugvs = min(max(int(ratio_x.value), 0), 4)
                 for i in range(1, num_ugvs + 1):
@@ -406,17 +380,3 @@ def GridView():
                     with solara.Div(classes=["legend-item"]):
                         solara.Text(icon, style={"font-size": "14px"})
                         solara.Text(f"UGV-{i}")
-
-            solara.Button(
-                "경로 수정",
-                on_click=handle_replan_click,
-                disabled=not is_active.value,
-                classes=["replan-btn"],
-                style={
-                    "background-color": "#e67e22" if is_active.value else "#374151",
-                    "color": "white" if is_active.value else "#94a3b8",
-                    "border": "none",
-                    "opacity": "1",
-                    "cursor": "pointer" if is_active.value else "default",
-                },
-            )

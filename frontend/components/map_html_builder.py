@@ -11,7 +11,7 @@ Leaflet 지도 HTML 빌더 — Solara 컴포넌트 컨텍스트와 완전히 격
 """
 
 from __future__ import annotations
-
+import json
 
 # 지도 고정 경계 (parquet 실측값, WGS84)
 _MAP_BOUNDS = {
@@ -29,7 +29,9 @@ _LAYER_MAP: dict[str, str] = {
 }
 
 
-def build_base_map_html(backend_url: str, selected_layer: str = "위험도") -> str:
+def build_base_map_html(backend_url: str, selected_layer: str = "위험도", markers: list[dict] | None = None) -> str:
+    markers = markers or []
+    markers_json = json.dumps(markers, ensure_ascii=False)
     """
     지형 PNG + 버퍼 오버레이 + 비용 레이어 Leaflet HTML 문자열 반환.
 
@@ -112,6 +114,7 @@ def build_base_map_html(backend_url: str, selected_layer: str = "위험도") -> 
   map.fitBounds(bounds, {{ padding: [8, 8] }});
 
   // ── postMessage 핸들러 ─────────────────────────────────
+  var initialMarkers = {markers_json};
   var mks = {{}};
 
   function makeIcon(c) {{
@@ -121,14 +124,38 @@ def build_base_map_html(backend_url: str, selected_layer: str = "위험도") -> 
       iconSize: [16,16], iconAnchor: [8,8], className: ''
     }});
   }}
+  
+  function drawMarkers(markers) {{
+    Object.keys(mks).forEach(function(id) {{
+      map.removeLayer(mks[id]);
+    }});
+    mks = {{}};
+
+    markers.forEach(function(m) {{
+      var lat = parseFloat(m.lat), lng = parseFloat(m.lng);
+      if (!isNaN(lat) && !isNaN(lng)) {{
+        mks[m.id] = L.marker([lat, lng], {{ icon: makeIcon(m.color || '#e67e22') }})
+          .bindTooltip(m.label || m.id, {{
+            permanent: true, direction: 'top', offset: [0, -12]
+          }})
+          .addTo(map);
+      }}
+    }});
+  }}
+
+  drawMarkers(initialMarkers);
 
   window.addEventListener('message', function(e) {{
     if (!e.data) return;
 
     // 마커 업데이트
     if (e.data.type === 'setMarkers') {{
+      Object.keys(mks).forEach(function(id) {{
+        map.removeLayer(mks[id]);
+      }});
+      mks = {{}};
+
       e.data.markers.forEach(function(m) {{
-        if (mks[m.id]) map.removeLayer(mks[m.id]);
         var lat = parseFloat(m.lat), lng = parseFloat(m.lng);
         if (!isNaN(lat) && !isNaN(lng)) {{
           mks[m.id] = L.marker([lat, lng], {{ icon: makeIcon(m.color || '#e67e22') }})

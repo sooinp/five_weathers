@@ -27,6 +27,15 @@ from typing import Any
 import requests
 import solara
 
+from components.state import (
+    active_btn,
+    selected_mission_mode,
+    operating_ugv_plan,
+    departure_times,
+    ARRIVAL_TIMES_BY_MODE,
+    MISSION_UGV_PLAN_BY_MODE,
+)
+
 # =========================================================
 # 백엔드 연결 설정
 # =========================================================
@@ -136,7 +145,7 @@ zoom_levels = {
 recon_time = solara.reactive("00:30:00")
 
 # ── 상단 제어 버튼 상태 ──────────────────────────────────
-active_btn      = solara.reactive("실행")
+#active_btn      = solara.reactive("")
 map_selection   = solara.reactive("위험도")
 replan_available = solara.reactive(False)
 
@@ -494,10 +503,22 @@ def _stop_ugv_movement() -> None:
 
 def set_active_button(name: str) -> None:
     active_btn.set(name)
+
+    if name in MISSION_UGV_PLAN_BY_MODE:
+        selected_mission_mode.set(name)
+        operating_ugv_plan.set(dict(MISSION_UGV_PLAN_BY_MODE[name]))
+        departure_times.set({
+            "user1": "03:00:00",
+            "user2": "03:00:00",
+            "user3": "03:00:00",
+        })
+        return
+
     if name == "실행":
         _start_ugv_movement()
         if active_run_id.value:
             _send_command("resume")
+
     elif name == "종료":
         _stop_ugv_movement()
         if active_run_id.value:

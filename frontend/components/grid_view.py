@@ -1,7 +1,6 @@
 import solara
 import solara.lab
 import time
-import asyncio
 
 from services.api_client import (
     BACKEND_HTTP_BASE,
@@ -43,9 +42,8 @@ def GridView(current_user="admin"):
     sim_available = solara.use_reactive(False)
     video_available = solara.use_reactive(False)
 
-    @solara.lab.use_task
-    async def clock_loop():
-        while True:
+    def clock_loop(cancel):
+        while not cancel.is_set():
             if timer_running.value and timer_end_ts.value is not None:
                 secs = timer_remaining_secs.value - 600
                 if secs <= 0:
@@ -61,14 +59,13 @@ def GridView(current_user="admin"):
                     txt = f"{h:02d}:{m:02d}:00"
                     remaining_time_text_global.value = txt
                     remaining_display.value = txt
+            time.sleep(0.5)
 
-            await asyncio.sleep(0.5)
+    solara.use_thread(clock_loop, dependencies=[])
 
-    @solara.lab.use_task
-    async def health_check_loop():
+    def health_check_loop(cancel):
         import requests as _hreq
-
-        def _check():
+        while not cancel.is_set():
             try:
                 _hreq.get(f"{BACKEND_HTTP_BASE}/health", timeout=2)
                 alive = True
@@ -95,14 +92,12 @@ def GridView(current_user="admin"):
                 except Exception:
                     sim = False
 
-            return alive, sim, video
+            backend_alive.value = alive
+            sim_available.value = sim
+            video_available.value = video
+            time.sleep(5)
 
-        while True:
-            _alive, _sim, _video = await asyncio.to_thread(_check)
-            backend_alive.value = _alive
-            sim_available.value = _sim
-            video_available.value = _video
-            await asyncio.sleep(5)
+    solara.use_thread(health_check_loop, dependencies=[])
 
     def handle_replan_click():
         if is_active.value:

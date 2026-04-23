@@ -27,6 +27,10 @@ htmlcov/
 # ── 로그 ─────────────────────────────────────────────────
 *.log
 logs/
+backend/.pgdata/
+backend/.pgpass_init.txt
+backend/pg_hba.conf.backup
+backend/pytest-cache-files*/
 
 # ── IDE ──────────────────────────────────────────────────
 .vscode/

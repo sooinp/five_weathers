@@ -5,7 +5,7 @@ backend/app/core/config.py
 .env 파일에서 자동 로드 (pydantic-settings).
 
 필수 .env 항목:
-    DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/hanhwa
+    DATABASE_URL=postgresql+asyncpg://postgres:password@127.0.0.1:55432/postgres
     JWT_SECRET_KEY=<충분히 긴 랜덤 문자열>
     ADMIN_USERNAME=admin
     ADMIN_PASSWORD=<강한 비밀번호>
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _UNSAFE_SECRETS = {"", "1234", "change-me", "secret", "change-me-to-random-secret"}
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _ENV_FILE = _BACKEND_DIR / ".env"
-_DEFAULT_DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5432/fiveweathersDB"
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://postgres:password@127.0.0.1:55432/postgres"
 
 
 class Settings(BaseSettings):

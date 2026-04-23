@@ -79,7 +79,6 @@ async def seed_operator(
         username=username,
         password_hash=hash_password(password),
         role="operator",
-        assigned_unit=assigned_unit,
     )
     session.add(operator)
     await session.commit()

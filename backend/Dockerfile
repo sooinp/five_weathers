@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM --platform=linux/arm64 python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
@@ -12,6 +12,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic/alembic.ini ./alembic/alembic.ini
 
 RUN mkdir -p /app/data
 

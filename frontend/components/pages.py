@@ -8,23 +8,37 @@ frontend/components/pages.py
             UnitAssetEditor, 차트 헬퍼 함수(build_line_chart_svg 등)
 [내 코드]   MainPage, CommanderHomeHeader, OperatorHomeHeader
 """
-
-import asyncio
 import json
 import os
-import threading
 import time
-import uuid
+import asyncio
 import solara
-from solara.toestand import Ref
+import solara.lab
 from datetime import datetime, timedelta
+import threading
 from components.grid_view import GridView
 from components.cards import LtwrMapPanel
 from components.map_html_builder import build_base_map_html
 from components.state import (
+    timer_running,
+    timer_end_ts,
     remaining_time_text_global,
-    start_mission_timer,
-    stop_mission_timer,
+    timer_remaining_secs,
+    video_should_play,
+    toast_trigger,
+    departure_times,
+    ARRIVAL_TIMES_BY_MODE,
+    selected_mission_mode,
+    operating_ugv_plan,
+    active_btn,
+    asset_data,
+    mission_settings,
+    mission_delivery_data,
+    DEST_INFO_BY_MODE,
+    mission_toast_count,
+    MISSION_UGV_PLAN_BY_MODE,
+    mission_toast_count,
+    mission_toast_message,
 )
 from services.api_client import (
     BACKEND_HTTP_BASE,
@@ -34,23 +48,21 @@ from services.api_client import (
     login_error,
     attempt_login,
     logged_in_user,
+    auth_token,
     NICKNAMES,
     go_home,
-    active_btn,
+    #active_btn,
     set_active_button,
     success_rate,
     asset_damage,
     status,
-    time_left,
     ratio_x,
     effect_success,
     effect_damage,
     queue_data,
     message_text,
     is_logged_in,
-    active_mission_id,
     active_run_id,
-    auth_token,
     # ── 팀원 코드: 역할/워크플로우 상태 ─────────────────────
     user_role,
     workflow_step,
@@ -58,7 +70,6 @@ from services.api_client import (
     mission_note,
     commander_data_ready,
     simulation_done,
-    mission_settings,
     zoom_levels,
     recon_time,
     # ── 내 코드: 홈 대시보드 상태 ───────────────────────────
@@ -66,179 +77,250 @@ from services.api_client import (
     home_role,
     home_role_label,
     home_current_time,
-    home_remaining_time,
     home_mission_notice,
     home_unit_label,
     home_asset_modes,
     selected_asset_mode,
     set_selected_asset_mode,
     post_operator_mission_config,
+    schedule_operator_mission_config_post,
     fetch_operator_briefing,
+    fetch_all_operator_briefings,
     unit_kpi_data,
-    mission_mode,
+    resolve_destination_coordinate_for_unit,
+    resolve_destination_slot_key_for_unit,
+    sync_unit_targets_from_mode_destinations,
 )
 from components import ws_client
-
+#from components.mission_actions import deliver_mission
 
 # ── 팀원 코드: 자산 현황 팝업 전역 상태 ──────────────────────────
-asset_popup_tab = solara.reactive("부대 기본자산")
+asset_popup_tab = solara.reactive("부대")
 
-asset_data = solara.reactive({
-    "base": {
-        "total_units": 3,
-        "total_controllers": 3,
-        "total_ugv": 15,   # 5+5+5
-        "lost_ugv": 6,     # 1+2+3
-        "departure_lat": "",
-        "departure_lon": "",
-    },
-    "user1": {
-        "controllers": 1,
-        "total_ugv": 5,
-        "lost_ugv": 0,
-        "available_ugv": 4,
-        "target_lat": "",
-        "target_lon": "",
-    },
-    "user2": {
-        "controllers": 1,
-        "total_ugv": 5,
-        "lost_ugv": 2,
-        "available_ugv": 3,
-        "target_lat": "",
-        "target_lon": "",
-    },
-    "user3": {
-        "controllers": 1,
-        "total_ugv": 5,
-        "lost_ugv": 0,
-        "available_ugv": 4,
-        "target_lat": "",
-        "target_lon": "",
-    },
-})
+asset_popup_open = solara.reactive(False)
+
+DEFAULT_DEPARTURE_TIME = "03:00:00"
+
+
+def _clean_text(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _first_nonempty(*values, default: str = "") -> str:
+    for value in values:
+        text = _clean_text(value)
+        if text and text != "-":
+            return text
+    return default
+
+
+def _resolve_mission_mode() -> str:
+    mode = _first_nonempty(
+        selected_mission_mode.value,
+        mission_settings.value.get("mode"),
+        active_btn.value,
+    )
+    return mode if mode in MISSION_UGV_PLAN_BY_MODE else "균형"
+
+
+def _resolve_operating_ugv_count(user_key: str) -> int:
+    def _to_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    direct_value = operating_ugv_plan.value.get(user_key)
+    if direct_value not in (None, "", 0, "0"):
+        return _to_int(direct_value)
+
+    mode = _resolve_mission_mode()
+    planned_value = MISSION_UGV_PLAN_BY_MODE.get(mode, {}).get(user_key)
+    if planned_value not in (None, "", 0, "0"):
+        return _to_int(planned_value)
+
+    available_value = asset_data.value.get(user_key, {}).get("available_ugv", 0)
+    return _to_int(available_value)
+
+
+def _resolve_departure_time(user_key: str) -> str:
+    return _first_nonempty(
+        departure_times.value.get(user_key),
+        mission_settings.value.get("depart_times", {}).get(user_key),
+        DEFAULT_DEPARTURE_TIME,
+        default="-",
+    )
+
+
+def _resolve_target_coordinate(user_key: str, axis: str) -> str:
+    mapped_value = _clean_text(resolve_destination_coordinate_for_unit(user_key, axis))
+    if mapped_value:
+        return mapped_value
+
+    asset_key = f"target_{axis}"
+    asset_value = _first_nonempty(asset_data.value.get(user_key, {}).get(asset_key))
+    if asset_value:
+        return asset_value
+
+    return ""
+
+# asset_data = solara.reactive({
+#     "base": {
+#         "total_units": 3,
+#         "total_controllers": 3,
+#         "total_ugv": 13,
+#         "lost_ugv": 1,
+#     },
+#     "user1": {
+#         "controllers": 1,
+#         "total_ugv": 4,
+#         "lost_ugv": 0,
+#         "available_ugv": 2,
+#         "target_lat": "39.12",
+#         "target_lon": "12.45",
+#     },
+#     "user2": {
+#         "controllers": 1,
+#         "total_ugv": 4,
+#         "lost_ugv": 0,
+#         "available_ugv": 4,
+#         "target_lat": "",
+#         "target_lon": "",
+#     },
+#     "user3": {
+#         "controllers": 1,
+#         "total_ugv": 5,
+#         "lost_ugv": 1,
+#         "available_ugv": 3,
+#         "target_lat": "",
+#         "target_lon": "",
+#     },
+# })
 
 
 # ── 팀원 코드: 임무 하달용 전역 상태 ──────────────────────────────
-selected_mission_mode = solara.reactive("균형")
+#### state.py로 옮김 (pages에서도 쓰고 grid_view에서도 쓰고 mission_actions에서도 써서,,)
+#### 균형/신속/정밀 일때 도착예정시각 / 출발예정시각
 
-operating_ugv_plan = solara.reactive({
-    "user1": 3,
-    "user2": 3,
-    "user3": 3,
-})
 
-departure_times = solara.reactive({
-    "user1": "02:20:00",
-    "user2": "02:10:00",
-    "user3": "02:30:00",
-})
 
-arrival_times = solara.reactive({
-    "user1": "07:30:00",
-    "user2": "08:30:00",
-    "user3": "08:00:00",
-})
 
-mission_delivery_data = solara.reactive({
-    "delivered": False,
-    "base_summary": {
-        "total_units": 0,
-        "total_controllers": 0,
-        "total_recon_ugv": 0,
-        "total_lost_ugv": 0,
-    },
-    "units": {
-        "user1": {"controllers": 0, "total_recon_ugv": 0, "lost_ugv": 0, "available_ugv": 0, "target_lat": "", "target_lon": ""},
-        "user2": {"controllers": 0, "total_recon_ugv": 0, "lost_ugv": 0, "available_ugv": 0, "target_lat": "", "target_lon": ""},
-        "user3": {"controllers": 0, "total_recon_ugv": 0, "lost_ugv": 0, "available_ugv": 0, "target_lat": "", "target_lon": ""},
-    },
-    "mission_info": {
-        "user1": {"mission_mode": "", "operating_ugv_count": 0, "departure_time": "", "arrival_time": "", "recon_time": ""},
-        "user2": {"mission_mode": "", "operating_ugv_count": 0, "departure_time": "", "arrival_time": "", "recon_time": ""},
-        "user3": {"mission_mode": "", "operating_ugv_count": 0, "departure_time": "", "arrival_time": "", "recon_time": ""},
-    },
-})
+
+# mission_delivery_data = solara.reactive({
+#     "delivered": False,
+#     "base_summary": {
+#         "total_units": 0,
+#         "total_controllers": 0,
+#         "total_recon_ugv": 0,
+#         "total_lost_ugv": 0,
+#     },
+#     "units": {
+#         "user1": {"controllers": 0, "total_recon_ugv": 0, "lost_ugv": 0, "available_ugv": 0, "target_lat": "", "target_lon": ""},
+#         "user2": {"controllers": 0, "total_recon_ugv": 0, "lost_ugv": 0, "available_ugv": 0, "target_lat": "", "target_lon": ""},
+#         "user3": {"controllers": 0, "total_recon_ugv": 0, "lost_ugv": 0, "available_ugv": 0, "target_lat": "", "target_lon": ""},
+#     },
+#     "mission_info": {
+#         "user1": {"mission_mode": "", "operating_ugv_count": 0, "departure_time": "", "arrival_time": "", "recon_time": ""},
+#         "user2": {"mission_mode": "", "operating_ugv_count": 0, "departure_time": "", "arrival_time": "", "recon_time": ""},
+#         "user3": {"mission_mode": "", "operating_ugv_count": 0, "departure_time": "", "arrival_time": "", "recon_time": ""},
+#     },
+# })
 
 
 ### 현재시간 나타내기
-current_time_text = datetime.now().strftime("%Y.%m.%d %H:%M")
+# 시뮬레이션 기준 시작 시각
+sim_base_time = datetime(2023, 7, 27, 3, 0, 0)
+# 앱이 시작된 실제 시각 (웹 서버/커널 켜진 시점)
+app_start_ts = time.time()
+# 단순 리렌더 유도용 tick
+tick = solara.reactive(0)
 
+
+def _get_sim_time_text() -> str:
+    elapsed_seconds = max(0, int(time.time() - app_start_ts))
+    current_sim_time = sim_base_time + timedelta(seconds=elapsed_seconds)
+    return current_sim_time.strftime("%Y.%m.%d %H:%M:%S")
+
+
+@solara.component
+def SimulationClockText(classes=None):
+    _ = tick.value  # tick 변화마다 리렌더 → 항상 최신 sim 시각
+    solara.Text(_get_sim_time_text(), classes=classes or [])
+
+
+
+#### 도착지 별 위도 경도 #####
+commander_input_state = solara.reactive({
+    "user1": {"lat": "", "lng": "", "recon": ""},
+    "user2": {"lat": "", "lng": "", "recon": ""},
+    "user3": {"lat": "", "lng": "", "recon": ""},
+})
+
+#### 도착지 별 위도 경도 반영 버튼 ####
+commander_marker_state = solara.reactive({
+    "user1": None,
+    "user2": None,
+    "user3": None,
+})
 
 # ──────────────────────────────────────────────────────────────
 # [팀원 코드] 부대 기본자산 편집 컴포넌트
 # ──────────────────────────────────────────────────────────────
 @solara.component
 def BaseAssetEditor():
-    form = solara.use_reactive(base_asset_snapshot())
+    total_units, set_total_units = solara.use_state("")
+    total_controllers, set_total_controllers = solara.use_state("")
+    total_ugv, set_total_ugv = solara.use_state("")
+    lost_ugv, set_lost_ugv = solara.use_state("")
 
-    def save_base_asset():
+    def _sync():
+        d = asset_data.value["base"]
+        set_total_units(str(d["total_units"]))
+        set_total_controllers(str(d["total_controllers"]))
+        set_total_ugv(str(d["total_ugv"]))
+        set_lost_ugv(str(d["lost_ugv"]))
+
+    solara.use_effect(_sync, [])
+
+    def _sync_base_field(field: str, value: str, setter):
+        setter(value)
         updated = dict(asset_data.value)
         updated_base = dict(updated["base"])
-        updated_base["total_units"] = form.value["total_units"]
-        updated_base["total_controllers"] = form.value["total_controllers"]
-        updated_base["total_ugv"] = form.value["total_ugv"]
-        updated_base["lost_ugv"] = form.value["lost_ugv"]
-        updated_base["departure_lat"] = form.value["departure_lat"]
-        updated_base["departure_lon"] = form.value["departure_lon"]
+        updated_base[field] = value
         updated["base"] = updated_base
-        asset_data.value = updated
+        asset_data.set(updated)
+        if auth_token.value and user_role.value == "commander":
+            schedule_operator_mission_config_post()
 
     def reset_base_asset():
-        form.set(base_asset_snapshot())
+        latest = asset_data.value["base"]
+        set_total_units(str(latest["total_units"]))
+        set_total_controllers(str(latest["total_controllers"]))
+        set_total_ugv(str(latest["total_ugv"]))
+        set_lost_ugv(str(latest["lost_ugv"]))
 
     with solara.Div(classes=["asset-form-card"]):
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 제대 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["total_units"]))
+            solara.InputText("", value=total_units, on_value=lambda v: _sync_base_field("total_units", v, set_total_units), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 통제관 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["total_controllers"]))
+            solara.InputText("", value=total_controllers, on_value=lambda v: _sync_base_field("total_controllers", v, set_total_controllers), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 정찰 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["total_ugv"]))
+            solara.InputText("", value=total_ugv, on_value=lambda v: _sync_base_field("total_ugv", v, set_total_ugv), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 손실 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["lost_ugv"]))
+            solara.InputText("", value=lost_ugv, on_value=lambda v: _sync_base_field("lost_ugv", v, set_lost_ugv), continuous_update=False)
 
-        with solara.Div(classes=["asset-form-row"]):
-            solara.Text("출발지 위도", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["departure_lat"]))
-
-        with solara.Div(classes=["asset-form-row"]):
-            solara.Text("출발지 경도", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["departure_lon"]))
-
-        with solara.Div(classes=["asset-form-action-row"]):
-            solara.Button("저장", on_click=save_base_asset, classes=["asset-save-btn"])
-            solara.Button("취소", on_click=reset_base_asset, classes=["asset-cancel-btn"])
-
-
-def base_asset_snapshot():
-    data = asset_data.value["base"]
-    return {
-        "total_units": str(data["total_units"]),
-        "total_controllers": str(data["total_controllers"]),
-        "total_ugv": str(data["total_ugv"]),
-        "lost_ugv": str(data["lost_ugv"]),
-        "departure_lat": str(data.get("departure_lat", "")),
-        "departure_lon": str(data.get("departure_lon", "")),
-    }
-
-
-def unit_asset_snapshot(unit_key: str):
-    data = asset_data.value[unit_key]
-    return {
-        "controllers": str(data["controllers"]),
-        "total_ugv": str(data["total_ugv"]),
-        "lost_ugv": str(data["lost_ugv"]),
-        "available_ugv": str(data["available_ugv"]),
-        "target_lat": str(data["target_lat"]),
-        "target_lon": str(data["target_lon"]),
-    }
+        # with solara.Div(classes=["asset-form-action-row"]):
+        #     solara.Button("저장", on_click=save_base_asset, classes=["asset-save-btn"])
+        #     solara.Button("취소", on_click=reset_base_asset, classes=["asset-cancel-btn"])
 
 
 # ──────────────────────────────────────────────────────────────
@@ -246,124 +328,104 @@ def unit_asset_snapshot(unit_key: str):
 # ──────────────────────────────────────────────────────────────
 @solara.component
 def UnitAssetEditor(unit_key: str, title: str):
-    form = solara.use_reactive(unit_asset_snapshot(unit_key))
+    controllers, set_controllers = solara.use_state("")
+    total_ugv, set_total_ugv = solara.use_state("")
+    lost_ugv, set_lost_ugv = solara.use_state("")
+    available_ugv, set_available_ugv = solara.use_state("")
+    target_lat, set_target_lat = solara.use_state("")
+    target_lon, set_target_lon = solara.use_state("")
 
-    def sync_form():
-        form.set(unit_asset_snapshot(unit_key))
+    # unit_key가 바뀔 때(탭 전환)마다 asset_data에서 값 재동기화
+    def _sync():
+        d = asset_data.value[unit_key]
+        set_controllers(str(d["controllers"]))
+        set_total_ugv(str(d["total_ugv"]))
+        set_lost_ugv(str(d["lost_ugv"]))
+        set_available_ugv(str(d["available_ugv"]))
+        set_target_lat(_resolve_target_coordinate(unit_key, "lat"))
+        set_target_lon(_resolve_target_coordinate(unit_key, "lon"))
 
-    solara.use_effect(sync_form, [unit_key])
+    solara.use_effect(
+        _sync,
+        [
+            unit_key,
+            selected_mission_mode.value,
+            mission_settings.value.get("mode"),
+            asset_data.value.get(unit_key, {}).get("controllers"),
+            asset_data.value.get(unit_key, {}).get("total_ugv"),
+            asset_data.value.get(unit_key, {}).get("lost_ugv"),
+            asset_data.value.get(unit_key, {}).get("available_ugv"),
+            asset_data.value.get(unit_key, {}).get("target_lat"),
+            asset_data.value.get(unit_key, {}).get("target_lon"),
+            destination_data.value.get("user1", {}).get("lat"),
+            destination_data.value.get("user1", {}).get("lng"),
+            destination_data.value.get("user2", {}).get("lat"),
+            destination_data.value.get("user2", {}).get("lng"),
+            destination_data.value.get("user3", {}).get("lat"),
+            destination_data.value.get("user3", {}).get("lng"),
+        ],
+    )
 
-    def save_unit_asset():
+    def _sync_unit_field(field: str, value: str, setter):
+        setter(value)
+        if field in ("target_lat", "target_lon"):
+            slot_key = resolve_destination_slot_key_for_unit(unit_key)
+            if slot_key:
+                destination_field = "lat" if field == "target_lat" else "lng"
+                updated_destinations = dict(destination_data.value)
+                updated_slot = dict(updated_destinations.get(slot_key, {}))
+                updated_slot[destination_field] = value
+                updated_destinations[slot_key] = updated_slot
+                destination_data.set(updated_destinations)
+                sync_unit_targets_from_mode_destinations()
+                if auth_token.value and user_role.value == "commander":
+                    schedule_operator_mission_config_post()
+                return
         updated = dict(asset_data.value)
         updated_unit = dict(updated[unit_key])
-        updated_unit["controllers"] = form.value["controllers"]
-        updated_unit["total_ugv"] = form.value["total_ugv"]
-        updated_unit["lost_ugv"] = form.value["lost_ugv"]
-        updated_unit["available_ugv"] = form.value["available_ugv"]
-        updated_unit["target_lat"] = form.value["target_lat"]
-        updated_unit["target_lon"] = form.value["target_lon"]
+        updated_unit[field] = value
         updated[unit_key] = updated_unit
-        asset_data.value = updated
+        asset_data.set(updated)
+        if auth_token.value and user_role.value == "commander":
+            schedule_operator_mission_config_post()
 
     def reset_unit_asset():
-        form.set(unit_asset_snapshot(unit_key))
+        latest = asset_data.value[unit_key]
+        set_controllers(str(latest["controllers"]))
+        set_total_ugv(str(latest["total_ugv"]))
+        set_lost_ugv(str(latest["lost_ugv"]))
+        set_available_ugv(str(latest["available_ugv"]))
+        set_target_lat(_resolve_target_coordinate(unit_key, "lat"))
+        set_target_lon(_resolve_target_coordinate(unit_key, "lon"))
 
     with solara.Div(classes=["asset-form-card"]):
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("통제관 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["controllers"]))
+            solara.InputText("", value=controllers, on_value=lambda v: _sync_unit_field("controllers", v, set_controllers), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("총 정찰 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["total_ugv"]))
+            solara.InputText("", value=total_ugv, on_value=lambda v: _sync_unit_field("total_ugv", v, set_total_ugv), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("손실 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["lost_ugv"]))
+            solara.InputText("", value=lost_ugv, on_value=lambda v: _sync_unit_field("lost_ugv", v, set_lost_ugv), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("운용 가능 UGV 수", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["available_ugv"]))
+            solara.InputText("", value=available_ugv, on_value=lambda v: _sync_unit_field("available_ugv", v, set_available_ugv), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("목표 위도", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["target_lat"]))
+            solara.InputText("", value=target_lat, on_value=lambda v: _sync_unit_field("target_lat", v, set_target_lat), continuous_update=False)
 
         with solara.Div(classes=["asset-form-row"]):
             solara.Text("목표 경도", classes=["asset-form-label"])
-            solara.InputText("", value=Ref(form.fields["target_lon"]))
+            solara.InputText("", value=target_lon, on_value=lambda v: _sync_unit_field("target_lon", v, set_target_lon), continuous_update=False)
 
-        with solara.Div(classes=["asset-form-action-row"]):
-            solara.Button("저장", on_click=save_unit_asset, classes=["asset-save-btn"])
-            solara.Button("취소", on_click=reset_unit_asset, classes=["asset-cancel-btn"])
-
-
-@solara.component
-def CommanderAssetPopupPanel(on_close):
-    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
-
-    with solara.Div(classes=["asset-popup-panel"]):
-        with solara.Div(classes=["asset-popup-header"]):
-            solara.Text("기본자산", classes=["asset-popup-title"])
-            solara.Button("X", on_click=on_close, classes=["asset-popup-close-btn"])
-
-        with solara.Div(classes=["asset-popup-body"]):
-            with solara.Div(classes=["asset-tab-col"]):
-                for tab_name, label in [
-                    ("부대 기본자산", "부대"),
-                    ("1제대 기본자산", "1제대"),
-                    ("2제대 기본자산", "2제대"),
-                    ("3제대 기본자산", "3제대"),
-                ]:
-                    solara.Button(
-                        label,
-                        on_click=lambda t=tab_name: set_asset_tab(t),
-                        classes=[
-                            "asset-tab-btn2",
-                            "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
-                        ],
-                    )
-
-            with solara.Div(classes=["asset-tab-content"]):
-                if asset_tab == "부대 기본자산":
-                    BaseAssetEditor()
-                elif asset_tab == "1제대 기본자산":
-                    UnitAssetEditor("user1", "1제대 기본자산")
-                elif asset_tab == "2제대 기본자산":
-                    UnitAssetEditor("user2", "2제대 기본자산")
-                elif asset_tab == "3제대 기본자산":
-                    UnitAssetEditor("user3", "3제대 기본자산")
-
-
-@solara.component
-def UserAssetPopupPanel(current_user: str, my_unit_label: str, on_close):
-    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
-
-    with solara.Div(classes=["asset-popup-panel"]):
-        with solara.Div(classes=["asset-popup-header"]):
-            solara.Text("기본자산", classes=["asset-popup-title"])
-            solara.Button("X", on_click=on_close, classes=["asset-popup-close-btn"])
-
-        with solara.Div(classes=["asset-popup-body"]):
-            with solara.Div(classes=["asset-tab-col"]):
-                for tab_name, label in [
-                    ("부대 기본자산", "부대"),
-                    (f"{my_unit_label} 기본자산", my_unit_label),
-                ]:
-                    solara.Button(
-                        label,
-                        on_click=lambda t=tab_name: set_asset_tab(t),
-                        classes=[
-                            "asset-tab-btn2",
-                            "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
-                        ],
-                    )
-
-            with solara.Div(classes=["asset-tab-content"]):
-                if asset_tab == "부대 기본자산":
-                    BaseAssetEditor()
-                else:
-                    UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
+        # with solara.Div(classes=["asset-form-action-row"]):
+        #     solara.Button("저장", on_click=save_unit_asset, classes=["asset-save-btn"])
+        #     solara.Button("취소", on_click=reset_unit_asset, classes=["asset-cancel-btn"])
 
 
 # ──────────────────────────────────────────────────────────────
@@ -371,6 +433,101 @@ def UserAssetPopupPanel(current_user: str, my_unit_label: str, on_close):
 # static/loginpage_picture_3.png 를 base64로 읽어 배경 이미지로 사용.
 # 클릭 시 로그인 폼 오버레이 표시.
 # ──────────────────────────────────────────────────────────────
+@solara.component
+def AssetPopupToggleButton():
+    is_open = asset_popup_open.value
+
+    solara.Button(
+        "자산 현황",
+        on_click=lambda: asset_popup_open.set(not is_open),
+        classes=["asset-tab-btn"],
+    )
+
+
+@solara.component
+def CommanderAssetPopupOverlay():
+    if not asset_popup_open.value:
+        return
+
+    active_tab = asset_popup_tab.value
+
+    with solara.Div(classes=["asset-popup-overlay-right"]):
+        with solara.Div(classes=["asset-popup-panel-right"]):
+            with solara.Div(classes=["asset-popup-header"]):
+                solara.Text("기본자산", classes=["asset-popup-title"])
+                solara.Button(
+                    "✕",
+                    on_click=lambda: asset_popup_open.set(False),
+                    classes=["asset-popup-close-btn"],
+                )
+
+            with solara.Div(classes=["asset-popup-body"]):
+                with solara.Div(classes=["asset-tab-col"]):
+                    for tab_name, label in [
+                        ("부대", "부대"),
+                        ("1제대 기본자산", "1제대"),
+                        ("2제대 기본자산", "2제대"),
+                        ("3제대 기본자산", "3제대"),
+                    ]:
+                        solara.Button(
+                            label,
+                            on_click=lambda t=tab_name: asset_popup_tab.set(t),
+                            classes=[
+                                "asset-tab-btn2",
+                                "asset-tab-btn2-active" if active_tab == tab_name else "asset-tab-btn2-default",
+                            ],
+                        )
+
+                with solara.Div(classes=["asset-tab-content"]):
+                    if active_tab == "부대":
+                        BaseAssetEditor()
+                    elif active_tab == "1제대 기본자산":
+                        UnitAssetEditor("user1", "1제대 기본자산")
+                    elif active_tab == "2제대 기본자산":
+                        UnitAssetEditor("user2", "2제대 기본자산")
+                    elif active_tab == "3제대 기본자산":
+                        UnitAssetEditor("user3", "3제대 기본자산")
+
+
+@solara.component
+def UserAssetPopupOverlay(current_user: str, my_unit_label: str):
+    if not asset_popup_open.value:
+        return
+
+    active_tab = asset_popup_tab.value
+
+    with solara.Div(classes=["asset-popup-overlay-right"]):
+        with solara.Div(classes=["asset-popup-panel-right"]):
+            with solara.Div(classes=["asset-popup-header"]):
+                solara.Text("기본자산", classes=["asset-popup-title"])
+                solara.Button(
+                    "✕",
+                    on_click=lambda: asset_popup_open.set(False),
+                    classes=["asset-popup-close-btn"],
+                )
+
+            with solara.Div(classes=["asset-popup-body"]):
+                with solara.Div(classes=["asset-tab-col"]):
+                    for tab_name, label in [
+                        ("부대", "부대"),
+                        (f"{my_unit_label} 기본자산", my_unit_label),
+                    ]:
+                        solara.Button(
+                            label,
+                            on_click=lambda t=tab_name: asset_popup_tab.set(t),
+                            classes=[
+                                "asset-tab-btn2",
+                                "asset-tab-btn2-active" if active_tab == tab_name else "asset-tab-btn2-default",
+                            ],
+                        )
+
+                with solara.Div(classes=["asset-tab-content"]):
+                    if active_tab == "부대":
+                        BaseAssetEditor()
+                    else:
+                        UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
+
+
 @solara.component
 def LoginPage():
     import base64
@@ -547,6 +704,7 @@ def LoginPage():
                         "USER ID",
                         value=input_username.value,
                         on_value=input_username.set,
+                        continuous_update=False,
                     )
 
                     def on_password_enter(v):
@@ -719,6 +877,8 @@ def make_risk_chart_svg():
     return build_line_chart_svg("제대별 임무 위험률", ["1제대", "2제대", "3제대"], values)
 
 
+
+
 # ──────────────────────────────────────────────────────────────
 # [팀원 코드] 지휘관 메인 페이지
 # 상단: 역할/자산현황 버튼 + 임무모드 선택 + 제대별 현황 테이블
@@ -737,78 +897,140 @@ def CommanderPage():
     unit3_recon = recon_times.get("user3", "-")
 
     run_state, set_run_state = solara.use_state("")
-    show_asset_popup, set_show_asset_popup = solara.use_state(False)
-    toast_count, set_toast_count = solara.use_state(0)
-    current_time_text, set_current_time_text = solara.use_state(
-        datetime.now().strftime("%Y.%m.%d %H:%M:%S"))
+    asset_tab, set_asset_tab = solara.use_state("부대")
+    #toastcount, settoastcount = solara.use_state(0)
+    # current_time_text, set_current_time_text = solara.use_state(
+    #     datetime.now().strftime("%Y.%m.%d %H:%M:%S"))
+    #start_time = datetime(2023, 7, 26, 15, 0, 0)
+    #current_time_text = sim_current_time.value.strftime("%Y.%m.%d %H:%M:%S")
     
-    def CommanderFlow():
-        if workflow_step.value == 0:
-            CommanderInputPage()
-        elif workflow_step.value == 1:
-            LoadingPage()
-        elif workflow_step.value == 2:
-            CommanderPage()
+    # 임무 모드별 상단 KPI 값 정의
+    MISSION_KPI_DATA = {
+        "균형": {
+            "mission_success": 98.0,    # 임무 성공률
+            "worst_success": 89.0,      # 최저 성공률
+            "arrived_ugv": 8.8,         # 도착 UGV 수
+            "sos_count": 18.9,          # SOS 요청 건수
+            "per_sos_queue": 10.0,      # 건당 대기열 (분)
+            "controller_util": 27.0,    # 통제관 가동률
+        },
+        "신속": {
+            # TODO: 신속 모드 값 채우기
+            "mission_success": 98.0,
+            "worst_success": 78.0,
+            "arrived_ugv": 8.8,
+            "sos_count": 15.9,
+            "per_sos_queue": 9.0,
+            "controller_util": 24.0,
+        },
+        "정밀": {
+            # TODO: 정밀 모드 값 채우기
+            "mission_success": 96.0,
+            "worst_success": 78.0,
+            "arrived_ugv": 8.6,
+            "sos_count": 19.4,
+            "per_sos_queue": 10.0,
+            "controller_util": 27.0,
+        },
+    }
     
-    def update_clock():
-        while True:
-            set_current_time_text(datetime.now().strftime("%Y.%m.%d %H:%M:%S"))
+    
+    def update_clock(cancel):
+        while not cancel.is_set():
             time.sleep(1)
+            tick.value += 1   # 1초마다 리렌더만 유도
 
     solara.use_thread(update_clock, dependencies=[])
 
+    def _sync_briefing_on_mount():
+        def _call():
+            selected_mode = selected_mission_mode.value if selected_mission_mode.value in MISSION_UGV_PLAN_BY_MODE else (
+                active_btn.value if active_btn.value in MISSION_UGV_PLAN_BY_MODE else ""
+            )
+            if (
+                selected_mode
+                and (
+                    any(operating_ugv_plan.value.get(ukey) is None for ukey in ("user1", "user2", "user3"))
+                    or any(departure_times.value.get(ukey) in (None, "") for ukey in ("user1", "user2", "user3"))
+                )
+            ):
+                set_active_button(selected_mode)
+            if auth_token.value and user_role.value == "commander":
+                if selected_mode:
+                    post_operator_mission_config()
+                    fetch_all_operator_briefings()
+            elif auth_token.value:
+                fetch_all_operator_briefings()
+
+        if auth_token.value:
+            threading.Thread(target=_call, daemon=True).start()
+        asset_popup_open.set(False)
+
+    solara.use_effect(_sync_briefing_on_mount, [])
+    
+    # tick을 읽어서 이 컴포넌트가 tick에 의존한다고 알려줌
+    _ = tick.value
+
+    # 여기서부터는 매번 "경과 시간"으로 현재 시뮬레이션 시각 계산
+    elapsed_seconds = int(time.time() - app_start_ts)
+    current_sim_time = sim_base_time + timedelta(seconds=elapsed_seconds)
+    current_time_text = current_sim_time.strftime("%Y.%m.%d %H:%M:%S")
+
+
     def start_execution():
         set_run_state("run")
-        start_mission_timer()
+        timer_running.value = True
+        timer_end_ts.value = time.time() + 3 * 3600
+        timer_remaining_secs.value = 10800   # 3시간
+        remaining_time_text_global.value = "03:00:00"
+        video_should_play.value = True
 
     def stop_execution():
         set_run_state("stop")
-        stop_mission_timer()
+        timer_running.value = False
+        timer_end_ts.value = None
+        timer_remaining_secs.value = 0
+        remaining_time_text_global.value = "00:00:00"
+        video_should_play.value = False
+       
+    def go_back():
+        workflow_step.set(0)
 
-    def deliver_mission():
-        mission_delivery_data.value = {
-            "delivered": True,
-            "base_summary": {
-                "total_units": asset_data.value.get("base", {}).get("total_units", 0),
-                "total_controllers": asset_data.value.get("base", {}).get("total_controllers", 0),
-                "total_recon_ugv": asset_data.value.get("base", {}).get("total_ugv", 0),
-                "total_lost_ugv": asset_data.value.get("base", {}).get("lost_ugv", 0),
-            },
-            "units": {
-                u: {
-                    "controllers": asset_data.value.get(u, {}).get("controllers", 0),
-                    "total_recon_ugv": asset_data.value.get(u, {}).get("total_ugv", 0),
-                    "lost_ugv": asset_data.value.get(u, {}).get("lost_ugv", 0),
-                    "available_ugv": asset_data.value.get(u, {}).get("available_ugv", 0),
-                    "target_lat": asset_data.value.get(u, {}).get("target_lat", ""),
-                    "target_lon": asset_data.value.get(u, {}).get("target_lon", ""),
-                }
-                for u in ("user1", "user2", "user3")
-            },
-            "mission_info": {
-                u: {
-                    "mission_mode": mission_mode.value,
-                    "operating_ugv_count": asset_data.value.get(u, {}).get("available_ugv", 0),
-                    "departure_time": departure_times.value.get(u, ""),
-                    "arrival_time": arrival_times.value.get(u, ""),
-                    "recon_time": mission_settings.value.get("recon_times", {}).get(u, ""),
-                }
-                for u in ("user1", "user2", "user3")
-            },
-        }
-        import threading
-        threading.Thread(target=post_operator_mission_config, daemon=True).start()
-        set_toast_count(toast_count + 1)
+    
 
-    now = datetime.now()
-    map_label_1 = "1시간 뒤"
-    map_label_2 = "2시간 뒤"
-    map_label_3 = "3시간 뒤"
+
+    map_label_1 = "h+1"
+    map_label_2 = "h+2"
+    map_label_3 = "h+3"
+    
+    
+    current_mode = selected_mission_mode.value if selected_mission_mode.value in MISSION_UGV_PLAN_BY_MODE else (
+        active_btn.value if active_btn.value in MISSION_UGV_PLAN_BY_MODE else None
+    )
+    current_arrival_times = ARRIVAL_TIMES_BY_MODE.get(current_mode, {})
 
     unit_info_rows = [
-        {"unit": "1제대", "ugv": asset_data.value.get("user1", {}).get("available_ugv", 0), "depart": departure_times.value.get("user1", "-"), "arrive": arrival_times.value.get("user1", "-"), "recon": unit1_recon or "-"},
-        {"unit": "2제대", "ugv": asset_data.value.get("user2", {}).get("available_ugv", 0), "depart": departure_times.value.get("user2", "-"), "arrive": arrival_times.value.get("user2", "-"), "recon": unit2_recon or "-"},
-        {"unit": "3제대", "ugv": asset_data.value.get("user3", {}).get("available_ugv", 0), "depart": departure_times.value.get("user3", "-"), "arrive": arrival_times.value.get("user3", "-"), "recon": unit3_recon or "-"},
+        {
+            "unit": "1제대",
+            "ugv": asset_data.value.get("user1", {}).get("available_ugv", 0),
+            "depart": departure_times.value.get("user1", "-"),
+            "arrive": current_arrival_times.get("user1", "-"),
+            "recon": unit1_recon or "-"
+        },
+        {
+            "unit": "2제대",
+            "ugv": asset_data.value.get("user2", {}).get("available_ugv", 0),
+            "depart": departure_times.value.get("user2", "-"),
+            "arrive": current_arrival_times.get("user2", "-"),
+            "recon": unit2_recon or "-"
+        },
+        {
+            "unit": "3제대",
+            "ugv": asset_data.value.get("user3", {}).get("available_ugv", 0),
+            "depart": departure_times.value.get("user3", "-"),
+            "arrive": current_arrival_times.get("user3", "-"),
+            "recon": unit3_recon or "-"
+        },
     ]
 
     solara.Style("""
@@ -832,20 +1054,24 @@ def CommanderPage():
         }
 
         .page-root {
-            width: 100vw; height: 100vh;
-            background: #0b1426; overflow: hidden;
-            box-sizing: border-box; padding: 16px;
+            width: 100vw;
+            height: 100vh;
+            background: #0b1426;
+            overflow: hidden;
+            box-sizing: border-box;
+            padding: 16px;
         }
 
         .page-shell {
             width: 100%; height: 100%;
+            min-height: 0;
             display: grid;
             /* 3컬럼 구조 고정 */
             grid-template-columns: 380px minmax(0, 1fr) 390px;
             /* 행 구조: 상단바(auto), 맵(1fr) */
             grid-template-rows: auto 1fr;
             column-gap: 12px;
-            row-gap: 8px; /* 상하 간격 조절 (더 붙이고 싶으면 값을 줄이세요) */
+            row-gap: 4px; /* 상하 간격 조절 (더 붙이고 싶으면 값을 줄이세요) */
             box-sizing: border-box;
         }
 
@@ -862,12 +1088,12 @@ def CommanderPage():
         .top-left-panel {
             grid-column: 1;
             grid-row: 1;
-            align-self: start;
+            align-self: stretch;
             background-color: rgba(22, 34, 56, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.55) !important;
-            border-radius: 16px; padding: 10px;
+            border-radius: 16px; padding: 8px;
             display: flex; flex-direction: column;
-            gap: 8px; box-sizing: border-box;
+            gap: 5px; box-sizing: border-box;
         }
 
         .top-right-panel {
@@ -877,6 +1103,7 @@ def CommanderPage():
             align-self: end; /* 아래쪽으로 밀착 */
             align-self: start;
             width: 100%;
+            min-height: 0; height: 100%;
             justify-self: stretch;
             background-color: rgba(22, 34, 56, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.55) !important;
@@ -891,27 +1118,6 @@ def CommanderPage():
 
         .top-user-row { display: flex; align-items: center; gap: 8px; }
 
-        .back-btn {
-            min-width: 38px !important; width: 38px !important;
-            height: 38px !important; background-color: #0f172a !important;
-            color: white !important; border-radius: 10px !important;
-            font-size: 20px !important; padding: 0 !important;
-        }
-
-        .user-role-tab {
-            min-width: 78px !important; height: 38px !important;
-            border-radius: 10px !important; font-size: 15px !important;
-            font-weight: 700 !important; padding: 0 12px !important;
-            background-color: #1e3a5f !important; color: white !important;
-        }
-
-        .asset-tab-btn {
-            flex: 1; height: 38px !important;
-            border-radius: 10px !important; font-size: 14px !important;
-            font-weight: 700 !important; background-color: #203250 !important;
-            color: white !important; padding: 0 10px !important;
-        }
-
         .mission-mode-card {
             background-color: rgba(15, 23, 38, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.45) !important;
@@ -923,18 +1129,19 @@ def CommanderPage():
 
         .mode-btn-row { display: flex; gap: 6px; }
 
-        .mode-btn {
-            flex: 1; height: 34px !important; border-radius: 9px !important;
-            font-size: 14px !important; font-weight: 700 !important;
-            padding: 0 !important; min-width: 0 !important;
-        }
 
         .mode-btn-active  { background-color: #e67e22 !important; color: white !important; }
         .mode-btn-default { background-color: #0f1b33 !important; color: white !important; }
 
         .unit-summary-header, .unit-summary-row {
-            display: flex; align-items: center;
-            justify-content: space-between; width: 100%; gap: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+            gap: 8px;
+            padding-left: 6px;
+            padding-right: 8px;
+            box-sizing: border-box;
         }
 
         .unit-summary-header {
@@ -955,8 +1162,9 @@ def CommanderPage():
             min-width: 0;
             display: flex;
             align-items: center;
-            justify-content: center;
-            text-align: center;
+            justify-content: flex-start;
+            text-align: left;
+            padding-left: 20px;
         }
         .col-ugv {
             flex: 0.9;
@@ -974,9 +1182,17 @@ def CommanderPage():
             justify-content: center;
             text-align: center;
         }
+        .col-dest {
+            flex: 1.35;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
         
         .summary-head-text  { color: #94a3b8 !important; font-size: 10.5px !important; font-weight: 700 !important; white-space: nowrap; letter-spacing: -0.2px; text-align: center; width: 100%; }
-        .summary-unit-text  { color: #d1d5db !important; font-size: 13px !important; font-weight: 700 !important; white-space: nowrap; text-align: center; width: 100%; }
+        .summary-unit-text  { color: #d1d5db !important; font-size: 13px !important; font-weight: 700 !important; white-space: nowrap; text-align: left; width: 100%; }
         .summary-value-text { color: white !important; font-size: 13px !important; font-weight: 600 !important; white-space: nowrap; text-align: center; width: 100%; }
 
         .ugv-badge {
@@ -1062,12 +1278,11 @@ def CommanderPage():
         .center-map-area {
             grid-column: 2;
             grid-row: 2;
-            height: 100%;
+            min-height: 0; height: 100%;
             display: flex;
             flex-direction: column;
             align-self: stretch;
             width: 100%;
-            height: 100%; /* 부모의 1fr 공간을 모두 차지 */
             display: flex;
             flex-direction: column;
             background-color: rgba(15, 23, 38, 0.72) !important;
@@ -1100,13 +1315,13 @@ def CommanderPage():
             grid-column: 3;
             grid-row: 1 / 3;
             min-width: 0;
-            min-height: 0;
+            min-height: 0; height: 100%;
             display: flex;
             flex-direction: column;
             background-color: rgba(11, 20, 38, 0.96) !important;
             border: 1px solid rgba(45, 58, 84, 0.8) !important;
             border-radius: 12px;
-            padding: 14px;
+            padding: 5px 1px 5px 10px;
             box-sizing: border-box;
             overflow-y: auto;
             scrollbar-gutter: stable;
@@ -1194,6 +1409,7 @@ def CommanderPage():
             position: fixed;
             bottom: 36px;
             left: 50%;
+            transform: translateX(-50%);
             background: rgba(30, 41, 59, 0.96);
             border: 1px solid rgba(255, 61, 154, 0.55);
             border-radius: 10px;
@@ -1239,18 +1455,12 @@ def CommanderPage():
             overflow: hidden;
         }
 
-        .asset-popup-left-overlay {
-            position: absolute;
-            inset: 0;
-            z-index: 25;
-        }
-
         .asset-popup-header {
             display: flex; align-items: center; justify-content: space-between;
-            margin-bottom: 10px; padding: 0 4px; flex-shrink: 0;
+            margin-bottom: 3px; padding: 6px 6px 2px 8px; flex-shrink: 0;
         }
 
-        .asset-popup-title { color: #e5e7eb !important; font-size: 20px !important; font-weight: 800 !important; }
+        .asset-popup-title { color: #94a3b8 !important; font-size: 20px !important; font-weight: 800 !important; }
 
         .asset-popup-close-btn {
             min-width: 34px !important; width: 34px !important; height: 34px !important;
@@ -1282,34 +1492,58 @@ def CommanderPage():
         .asset-tab-btn2-default { background-color: #1b2c47 !important; color: #d1d5db !important; }
 
         .asset-tab-content {
-            flex: 1; min-height: 0; height: 100%;
-            overflow-y: auto; padding-right: 4px;
-            position: relative; z-index: 1;
+            flex: 1;
+            min-height: 0;
+            padding-top: 8px;
+            padding-bottom: 8px;
+            overflow-y: auto;
+            padding-right: 5px;
+            scrollbar-width: thin;
+            scrollbar-color: #4b6387 #162133;
+        }
+        .asset-tab-content::-webkit-scrollbar {
+            width: 10px;
+        }
+
+        .asset-tab-content::-webkit-scrollbar-track {
+            background: #162133;
+            border-radius: 999px;
+        }
+
+        .asset-tab-content::-webkit-scrollbar-thumb {
+            background: #4b6387;
+            border-radius: 999px;
+            border: 2px solid #162133;
+        }
+
+        .asset-tab-content::-webkit-scrollbar-thumb:hover {
+            background: #5f7aa3;
         }
 
         .asset-form-card {
             background: rgba(30, 41, 59, 0.55);
             border: 1px solid rgba(148, 163, 184, 0.12);
-            border-radius: 14px; padding: 14px 12px;
+            border-radius: 14px;
+            padding: 4px 20px;
+            min-height: 100%;
             display: flex; flex-direction: column;
-            justify-content: flex-start; gap: 1px; height: 100%;
+            justify-content: flex-start; gap: 2px;
         }
 
         .asset-form-title { color: #e5e7eb !important; font-size: 15px !important; font-weight: 800 !important; margin-bottom: 4px; }
 
         .asset-form-row {
-            display: flex; flex-direction: column;
-            align-items: stretch; gap: 6px; min-height: auto;
+            display: grid; grid-template-columns: 130px 1fr;
+            align-items: center; gap: 10px; min-height: 55px;
         }
 
         .asset-form-label {
-            color: #d1d5db !important; font-size: 11px !important;
-            font-weight: 700 !important; line-height: 1.3;
-            display: block; min-height: 0;
-            position: relative; z-index: 3;
+            color: #d1d5db !important; font-size: 14px !important;
+            font-weight: 700 !important; line-height: 1;
+            display: flex; align-items: center; height: 100%;
         }
 
-        .asset-form-action-row { display: flex; gap: 10px; margin-top: auto; position: relative; z-index: 3; }
+        .asset-form-action-row { display: flex; gap: 10px; margin-top: auto; }
 
         .asset-save-btn {
             flex: 1; height: 38px !important; border-radius: 8px !important;
@@ -1332,8 +1566,6 @@ def CommanderPage():
         .asset-form-card .v-input {
             margin-top: 0 !important; padding-top: 0 !important;
             display: flex !important; align-items: center !important;
-            width: 100% !important;
-            position: relative !important; z-index: 3 !important;
         }
 
         .asset-form-card .v-input__control { min-height: 44px !important; }
@@ -1341,12 +1573,12 @@ def CommanderPage():
         .asset-form-card .v-input__slot,
         .asset-form-card .v-text-field > .v-input__control > .v-input__slot {
             min-height: 44px !important; display: flex !important;
-            align-items: center !important; padding: 0 !important;
+            align-items: center !important; padding: 0 10px !important;
         }
 
         .v-btn.back-btn {
             min-width: 72px !important;
-            height: 34px !important;
+            height: 32px !important;
             padding: 0 12px !important;
         }
 
@@ -1361,7 +1593,7 @@ def CommanderPage():
             background-color: rgba(15, 23, 38, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.45) !important;
             border-radius: 13px;
-            padding: 10px 12px;
+            padding: 9px 10px;
             display: flex;
             flex-direction: row;
             align-items: center;
@@ -1426,20 +1658,20 @@ def CommanderPage():
         }
 
         .home-btn {
-            min-width: 72px !important;
-            height: 38px !important;
+            min-width: 60px !important;
+            height: 32px !important;
             background-color: #0f172a !important;
             color: white !important;
             border-radius: 10px !important;
             font-size: 13px !important;
             font-weight: 700 !important;
-            padding: 0 12px !important;
+            padding: 0 8px !important;
         }
 
         .back-nav-btn {
-            min-width: 38px !important;
-            width: 38px !important;
-            height: 38px !important;
+            min-width: 32px !important;
+            width: 32px !important;
+            height: 32px !important;
             background-color: #0f172a !important;
             color: white !important;
             border-radius: 10px !important;
@@ -1449,8 +1681,8 @@ def CommanderPage():
         }
 
         .v-btn.user-role-tab {
-            min-width: 100px !important;
-            height: 38px !important;
+            min-width: 80px !important;
+            height: 32px !important;
             border-radius: 10px !important;
             font-size: 15px !important;
             font-weight: 700 !important;
@@ -1462,7 +1694,7 @@ def CommanderPage():
 
         .asset-tab-btn {
             flex: 1;
-            height: 38px !important;
+            height: 32px !important;
             border-radius: 10px !important;
             font-size: 14px !important;
             font-weight: 700 !important;
@@ -1475,7 +1707,7 @@ def CommanderPage():
             background-color: rgba(15, 23, 38, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.45) !important;
             border-radius: 13px;
-            padding: 9px 10px;
+            padding: 6px 8px;
             display: flex;
             flex-direction: row;
             align-items: center;
@@ -1508,7 +1740,7 @@ def CommanderPage():
         .mode-btn {
             flex: 1 1 0;
             min-width: 0 !important;
-            height: 34px !important;
+            height: 30px !important;
             border-radius: 9px !important;
             font-size: 14px !important;
             font-weight: 700 !important;
@@ -1566,15 +1798,47 @@ def CommanderPage():
                 scrollbar-color: rgba(148, 163, 184, 0.35) rgba(30, 41, 59, 0.95);
             }
         }
+        .right-top-summary-box,
+        .right-bottom-ltwr-box {
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+        }
+
+        .card-label {
+            color: #94a3b8 !important;
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 8px;
+        }
+        
+        
+        .asset-popup-overlay-right {
+            position: absolute;
+            inset: 0;
+            z-index: 30;
+            display: flex;
+            background: rgba(15, 23, 38, 0.72);
+            border-radius: 12px;
+        }
+
+        .asset-popup-panel-right {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            background: #0f1726;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            box-sizing: border-box;
+        }
     """)
 
     with solara.Div(classes=["page-root"]):
 
-        if toast_count > 0:
+        if mission_toast_count.value > 0:
             solara.HTML(
                 tag="div",
-                unsafe_innerHTML=f"✅&nbsp;&nbsp;임무가 하달되었습니다.",
-                attributes={"class": "mission-toast", "key": str(toast_count)},
+                unsafe_innerHTML=f"✅&nbsp;&nbsp;{mission_toast_message.value}",
+                attributes={"class": "mission-toast"},
             )
 
         # 1. 전체 쉘에 그리드와 높이 고정 (화면 밖 짤림 방지)
@@ -1582,134 +1846,59 @@ def CommanderPage():
             "display": "grid",
             "grid-template-columns": "380px minmax(0, 1fr) 390px",
             "grid-template-rows": "auto 1fr",
-            "gap": "16px",
-            "height": "95vh",
-            "padding": "16px",
-            "box-sizing": "border-box"
+            "column-gap": "12px",
+            "row-gap": "4px",
+            "height": "100%",
+            "min-height": "0",
+            "padding": "0",
+            "box-sizing": "border-box",
         }):
 
             # ── [좌측 컬럼] 상단 패널 + 차트 영역 ──────────────────
             with solara.Div(style={
                 "grid-column": "1",
-                "grid-row": "1 / 3",
+                "grid-row": "1",
                 "display": "flex",
                 "flex-direction": "column",
-                "gap": "16px",
-                "min-height": "0"
+                "min-height": "0",
             }):
                 # 상단 좌측 패널
-                with solara.Div(classes=["top-left-panel"], style={"width": "100%"}):
+                with solara.Div(classes=["top-left-panel"], style={"width": "100%", "height": "100%"}):
                     with solara.Div(classes=["top-user-row"]):
-                        solara.Button("HOME", on_click=go_home, classes=["back-btn"])
+                        solara.Button("HOME", on_click=go_home, classes=["home-btn"])
                         solara.Button("←", on_click=go_back, classes=["back-nav-btn"])
                         solara.Button(user_label, classes=["user-role-tab"])
                         solara.Button(
                             "자산 현황",
-                            on_click=lambda: set_show_asset_popup(not show_asset_popup),
-                            classes=["asset-tab-btn"]
+                            on_click=lambda: asset_popup_open.set(not asset_popup_open.value),
+                            classes=["asset-tab-btn"],
                         )
 
-                    with solara.Div(classes=["mission-mode-card"]):
-                        solara.Text("임무 모드", classes=["mode-title"])
-                        with solara.Div(classes=["mode-btn-row"]):
+                    with solara.Div(classes=["mission-mode-card-inline"]):
+                        solara.Text("임무 모드", classes=["mode-title-inline"])
+                        with solara.Div(classes=["mode-btn-row-inline"]):
                             for b in ["균형", "정밀", "신속"]:
                                 solara.Button(
                                     b,
-                                    on_click=lambda x=b: mission_mode.set(x),
+                                    on_click=lambda x=b: set_active_button(x),
                                     classes=[
                                         "mode-btn",
-                                        "mode-btn-active" if mission_mode.value == b else "mode-btn-default",
+                                        "mode-btn-active" if active_btn.value == b else "mode-btn-default",
                                     ],
                                 )
 
                     with solara.Div(classes=["current-time-card-inline"]):
                         solara.Text("현재 시각", classes=["current-time-label-inline"])
-                        solara.Text(current_time_text, classes=["current-time-value-inline"])
+                        SimulationClockText(classes=["current-time-value-inline"])
 
-                # 하단 좌측 (차트 및 실행 버튼)
-                with solara.Div(
-                    classes=["left-sub-sidebar"],
-                    style={
-                        "flex": "1",
-                        "display": "flex",
-                        "flex-direction": "column",
-                        "gap": "16px",
-                        "min-height": "0",
-                        "position": "relative"
-                    }
-                ):
-                    if show_asset_popup:
-                        with solara.Div(classes=["asset-popup-overlay-left"]):
-                            with solara.Div(classes=["asset-popup-panel"], style={"flex": "1"}):
-                                with solara.Div(classes=["asset-popup-header"]):
-                                    solara.Text("기본자산", classes=["asset-popup-title"])
-                                    solara.Button(
-                                        "✕",
-                                        on_click=lambda: set_show_asset_popup(False),
-                                        classes=["asset-popup-close-btn"]
-                                    )
 
-                                with solara.Div(classes=["asset-popup-body"]):
-                                    with solara.Div(classes=["asset-tab-col"]):
-                                        for tab_name, label in [
-                                            ("부대 기본자산", "부대"),
-                                            ("1제대 기본자산", "1제대"),
-                                            ("2제대 기본자산", "2제대"),
-                                            ("3제대 기본자산", "3제대"),
-                                        ]:
-                                            solara.Button(
-                                                label,
-                                                on_click=lambda t=tab_name: set_asset_tab(t),
-                                                classes=[
-                                                    "asset-tab-btn2",
-                                                    "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default"
-                                                ]
-                                            )
-
-                                    with solara.Div(classes=["asset-tab-content"]):
-                                        if asset_tab == "부대 기본자산":
-                                            BaseAssetEditor()
-                                        elif asset_tab == "1제대 기본자산":
-                                            UnitAssetEditor("user1", "1제대 기본자산")
-                                        elif asset_tab == "2제대 기본자산":
-                                            UnitAssetEditor("user2", "2제대 기본자산")
-                                        elif asset_tab == "3제대 기본자산":
-                                            UnitAssetEditor("user3", "3제대 기본자산")
-
-                    with solara.Div(classes=["mission-chart-card"]):
-                        with solara.Div(classes=["chart-block"]):
-                            solara.Text("제대별 임무 성공률", classes=["chart-title"])
-                            solara.HTML(tag="div", unsafe_innerHTML=make_success_chart_svg())
-
-                        with solara.Div(classes=["chart-divider"]):
-                            pass
-
-                        with solara.Div(classes=["chart-block"]):
-                            solara.Text("제대별 임무 위험률", classes=["chart-title"])
-                            solara.HTML(tag="div", unsafe_innerHTML=make_risk_chart_svg())
-
-                    with solara.Div(classes=["control-btn-card"]):
-                        with solara.Div(classes=["control-btn-row"]):
-                            solara.Button(
-                                "실행",
-                                on_click=start_execution,
-                                classes=["run-btn", "btn-selected" if run_state == "run" else "btn-unselected"]
-                            )
-                            solara.Button(
-                                "종료",
-                                on_click=stop_execution,
-                                classes=["stop-btn", "btn-selected" if run_state == "stop" else "btn-unselected"]
-                            )
-
-                        solara.Button("임무 하달", on_click=deliver_mission, classes=["mission-delivery-btn"])
-
-            # ── [중앙 컬럼] 상단 테이블 + 센터 맵 ──────────
+            # 센터 상단 (운용정보 테이블만) — col 2, row 1
             with solara.Div(style={
                 "grid-column": "2",
-                "grid-row": "1 / 3",
+                "grid-row": "1",
                 "display": "flex",
                 "flex-direction": "column",
-                "min-height": "0"
+                "min-height": "0",
             }):
                 with solara.Div(classes=["top-right-panel"], style={"margin-bottom": "0px"}):
                     with solara.Div(classes=["unit-summary-header"]):
@@ -1717,64 +1906,306 @@ def CommanderPage():
                             solara.Text("", classes=["summary-head-text"])
                         with solara.Div(classes=["col-ugv"]):
                             solara.Text("운용 UGV 수", classes=["summary-head-text"])
+                        with solara.Div(classes=["col-dest"]):
+                            solara.Text("도착지 정보", classes=["summary-head-text"])
                         with solara.Div(classes=["col-time"]):
                             solara.Text("출발 예정 시각", classes=["summary-head-text"])
                         with solara.Div(classes=["col-time"]):
                             solara.Text("도착 예정 시각", classes=["summary-head-text"])
-                        with solara.Div(classes=["col-time"]):
-                            solara.Text("정찰 예정 시간", classes=["summary-head-text"])
+
+                    unit_key_map = {
+                        "1제대": "user1",
+                        "2제대": "user2",
+                        "3제대": "user3",
+                    }
+
+                    display_rows = []
+                    current_mode = selected_mission_mode.value if selected_mission_mode.value in MISSION_UGV_PLAN_BY_MODE else (
+                        active_btn.value if active_btn.value in MISSION_UGV_PLAN_BY_MODE else None
+                    )
+                    dest_map_for_mode = DEST_INFO_BY_MODE.get(current_mode, {})
 
                     for row in unit_info_rows:
+                        new_row = dict(row)
+                        key = unit_key_map.get(row["unit"])
+
+                        if key and current_mode:
+                            # 운용 UGV 수
+                            new_row["ugv"] = operating_ugv_plan.value.get(key)
+                            if new_row["ugv"] is None:
+                                new_row["ugv"] = MISSION_UGV_PLAN_BY_MODE.get(
+                                    current_mode,
+                                    {},
+                                ).get(key, asset_data.value.get(key, {}).get("available_ugv", 0))
+                            # 출발 예정 시각
+                            new_row["depart"] = (
+                                departure_times.value.get(key)
+                                or mission_settings.value.get("depart_times", {}).get(key)
+                                or "-"
+                            )
+                            # 도착지 정보 (모드별 매핑)
+                            new_row["dest_info"] = dest_map_for_mode.get(row["unit"])
+                            new_row["ugv"] = _resolve_operating_ugv_count(key)
+                            new_row["depart"] = _resolve_departure_time(key)
+                        else:
+                            new_row["ugv"] = "-"
+                            new_row["depart"] = "-"
+                            new_row["dest_info"] = "-"
+                            new_row["arrive"] = "-"
+
+                        display_rows.append(new_row)
+
+                    for row in display_rows:
                         with solara.Div(classes=["unit-summary-row"]):
                             with solara.Div(classes=["col-unit"]):
                                 solara.Text(row["unit"], classes=["summary-unit-text"])
-                            with solara.Div(classes=["col-ugv"]):
-                                solara.HTML(tag="div", unsafe_innerHTML=f"<div class='ugv-badge'>{row['ugv']}</div>")
-                            with solara.Div(classes=["col-time"]):
-                                solara.Text(row["depart"], classes=["summary-value-text"])
-                            with solara.Div(classes=["col-time"]):
-                                solara.Text(row["arrive"], classes=["summary-value-text"])
-                            with solara.Div(classes=["col-time"]):
-                                solara.Text(str(row["recon"]), classes=["summary-value-text"])
 
+                            ugv_color_map = {
+                                "1제대": "rgba(249, 115, 22, 1)",
+                                "2제대": "rgba(34, 211, 238, 1)",
+                                "3제대": "rgba(244, 114, 182, 1)",
+                            }
+
+                            # 운용 UGV 수
+                            with solara.Div(classes=["col-ugv"]):
+                                color = ugv_color_map.get(row["unit"], "#e67e22")
+                                ugv_value = "-" if row["ugv"] is None else row["ugv"]
+                                solara.HTML(
+                                    tag="div",
+                                    unsafe_innerHTML=(
+                                        "<div style='width:30px;height:24px;border-radius:7px;"
+                                        f"background:{color};display:flex;align-items:center;justify-content:center;"
+                                        "color:white;font-weight:800;font-size:14px;margin:0 auto;'>"
+                                        f"{ugv_value}</div>"
+                                    ),
+                                )
+
+                            # 도착지 정보
+                            with solara.Div(classes=["col-dest"]):
+                                dest_value = "-" if row.get("dest_info") is None else row["dest_info"]
+                                solara.Text(dest_value, classes=["summary-value-text"])
+
+                            # 출발 예정 시각
+                            with solara.Div(classes=["col-time"]):
+                                depart_value = "-" if row.get("depart") is None else row["depart"]
+                                solara.Text(depart_value, classes=["summary-value-text"])
+
+                            # 도착 예정 시각 (기존 로직 유지)
+                            with solara.Div(classes=["col-time"]):
+                                if row["unit"] == "3제대" and active_btn.value in ["균형", "정밀"]:
+                                    solara.Text(
+                                        row["arrive"],
+                                        style={
+                                            "color": "#ef4444",
+                                            "font-size": "13px",
+                                            "font-weight": "600",
+                                            "white-space": "nowrap",
+                                            "text-align": "center",
+                                            "width": "100%",
+                                        },
+                                    )
+                                else:
+                                    solara.Text(row["arrive"], classes=["summary-value-text"])
+
+            # 센터 맵 — col 1~2 전체, row 2
+            with solara.Div(style={
+                "grid-column": "1 / 3",
+                "grid-row": "2",
+                "display": "flex",
+                "flex-direction": "column",
+                "min-height": "0",
+            }):
                 with solara.Div(classes=["center-map-area"], style={
                     "flex": "1",
                     "display": "flex",
                     "flex-direction": "column",
-                    "margin-top": "12px",
-                    "min-height": "0"
+                    "min-height": "0",
                 }):
                     with solara.Div(classes=["center-map-inner"], style={
                         "flex": "1",
                         "display": "flex",
-                        "flex-direction": "column"
+                        "flex-direction": "column",
                     }):
-                        GridView()
+                        GridView(current_user=current_user)
 
-            # ── [우측 컬럼] 날씨 맵 ────────────────────
+            # ── [우측 컬럼] 큰 남색 박스 안에 상/하 2분할 ────────────────────
             with solara.Div(classes=["right-sidebar-area"], style={
                 "grid-column": "3",
                 "grid-row": "1 / 3",
-                "display": "flex",
-                "flex-direction": "column",
-                "min-height": "0"
+                "min-height": "0",
+                "min-width": "0",
             }):
-                solara.Text("Weather Risk Map", classes=["card-label"], style={"font-size": "18px", "margin-bottom": "15px"})
-                with solara.Div(
-                    classes=["ltwr-scroll-area"],
-                    style={
+                with solara.Div(classes=["right-sidebar-inner"], style={
+                    "width": "100%",
+                    "height": "100%",
+                    "display": "flex",
+                    "flex-direction": "column",
+                    "gap": "5px",
+                    "min-height": "0",
+                }):
+
+                    # [위] 임무 요약 박스 + 자산현황 팝업 영역
+                    with solara.Div(classes=["right-top-panel"], style={
                         "flex": "1",
+                        "min-height": "0",
+                        "background": "rgba(15, 23, 42, 0.55)",
+                        "border": "1px solid rgba(148, 163, 184, 0.12)",
+                        "border-radius": "12px",
+                        "padding": "8px",
+                        "box-sizing": "border-box",
                         "display": "flex",
                         "flex-direction": "column",
-                        "gap": "12px",
-                        "overflow-y": "auto",
-                        "padding-right": "4px"
-                    }
-                ):
-                    MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
-                    MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
-                    MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
+                        "position": "relative",
+                    }):
+                        solara.Text(
+                            "임무 요약",
+                            classes=["card-label"],
+                            style={
+                                "font-size": "15px",
+                                "margin-bottom": "5px",
+                                "margin-left": "5px",
+                            },
+                        )
 
+                        # 현재 임무 모드에 따른 KPI 값 가져오기
+                        kpi_data = MISSION_KPI_DATA.get(active_btn.value) if active_btn.value else None
+
+                        def kpi_row(label: str, value_text: str, unit_text: str, is_last: bool = False):
+                            with solara.Div(style={
+                                "display": "flex",
+                                "align-items": "baseline",
+                                "justify-content": "space-between",
+                                "padding": "0 0 8px 0",
+                                "margin-bottom": "7px" if not is_last else "0px",
+                                "border-bottom": "none" if is_last else "1px solid rgba(71, 85, 105, 0.25)",
+                            }):
+                                # 왼쪽 라벨
+                                solara.Text(label, style={
+                                    "font-size": "16px",
+                                    "font-weight": "400",
+                                    "color": "#abb1b9",
+                                })
+
+                                # 오른쪽 숫자 + 단위 묶음
+                                with solara.Div(style={
+                                    "display": "flex",
+                                    "align-items": "baseline",
+                                    "gap": "2px",
+                                }):
+                                    solara.Text(value_text, style={
+                                        "font-size": "20px",
+                                        "font-weight": "700",
+                                        "color": "#e5e7eb",
+                                        "text-align": "right",
+                                    })
+                                    solara.Text(unit_text, style={
+                                        "font-size": "18px",
+                                        "font-weight": "600",
+                                        "color": "#475569",
+                                    })
+
+                        # 내부 요약 박스
+                        with solara.Div(classes=["summary-inner-box"], style={
+                            "flex": "1",
+                            "min-height": "0",
+                            "background": "rgba(30, 41, 59, 0.38)",
+                            "border": "1px solid rgba(71, 85, 105, 0.28)",
+                            "border-radius": "9px",
+                            "padding": "10px 12px",
+                            "box-sizing": "border-box",
+                            "display": "flex",
+                            "flex-direction": "column",
+                            "justify-content": "flex-start",
+                        }):
+                            # 1. 임무 성공률
+                            kpi_row("임무 성공률", f"{kpi_data['mission_success']:.1f}" if kpi_data else "-", "%" if kpi_data else "")
+                            # 2. 최저 성공률
+                            kpi_row("최저 성공률", f"{kpi_data['worst_success']:.1f}" if kpi_data else "-", "%" if kpi_data else "")
+                            # 3. 도착 UGV 수
+                            kpi_row("도착 UGV 수", f"{kpi_data['arrived_ugv']:.1f}" if kpi_data else "-", "대" if kpi_data else "")
+                            # 4. SOS 요청 건수
+                            kpi_row("SOS 요청 건수", f"{kpi_data['sos_count']:.1f}" if kpi_data else "-", "건" if kpi_data else "")
+                            # 5. 건당 대기열
+                            kpi_row("건당 대기열", f"{kpi_data['per_sos_queue']:.1f}" if kpi_data else "-", "분" if kpi_data else "")
+                            # 6. 통제관 가동률
+                            kpi_row("통제관 가동률", f"{kpi_data['controller_util']:.1f}" if kpi_data else "-", "%" if kpi_data else "", is_last=True)
+
+                        # ✅ 자산 현황 팝업: 임무 요약 박스 크기에 맞춰 overlay
+                        CommanderAssetPopupOverlay()
+                        if False:
+                            with solara.Div(classes=["asset-popup-overlay-right"]):
+                                with solara.Div(classes=["asset-popup-panel-right"]):
+                                    with solara.Div(classes=["asset-popup-header"]):
+                                        solara.Text("기본자산", classes=["asset-popup-title"])
+                                        solara.Button(
+                                            "✕",
+                                            on_click=lambda: set_show_asset_popup(False),
+                                            classes=["asset-popup-close-btn"],
+                                        )
+
+                                    with solara.Div(classes=["asset-popup-body"]):
+                                        with solara.Div(classes=["asset-tab-col"]):
+                                            for tab_name, label in [
+                                                ("부대", "부대"),
+                                                ("1제대 기본자산", "1제대"),
+                                                ("2제대 기본자산", "2제대"),
+                                                ("3제대 기본자산", "3제대"),
+                                            ]:
+                                                solara.Button(
+                                                    label,
+                                                    on_click=lambda t=tab_name: set_asset_tab(t),
+                                                    classes=[
+                                                        "asset-tab-btn2",
+                                                        "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
+                                                    ],
+                                                )
+
+                                        with solara.Div(classes=["asset-tab-content"]):
+                                            if asset_tab == "부대":
+                                                BaseAssetEditor()
+                                            elif asset_tab == "1제대 기본자산":
+                                                UnitAssetEditor("user1", "1제대 기본자산")
+                                            elif asset_tab == "2제대 기본자산":
+                                                UnitAssetEditor("user2", "2제대 기본자산")
+                                            elif asset_tab == "3제대 기본자산":
+                                                UnitAssetEditor("user3", "3제대 기본자산")
+
+                    # [아래] LTWR 박스
+                    with solara.Div(classes=["right-bottom-panel"], style={
+                        "flex": "1",
+                        "min-height": "0",
+                        "display": "flex",
+                        "flex-direction": "column",
+                        "background": "rgba(15, 23, 42, 0.55)",
+                        "border": "1px solid rgba(148, 163, 184, 0.12)",
+                        "border-radius": "12px",
+                        "padding": "8px",
+                        "box-sizing": "border-box",
+                        "overflow": "hidden",
+                    }):
+                        solara.Text(
+                            "지상 작전 기상 위험도 - LTWR",
+                            classes=["card-label"],
+                            style={"font-size": "15px", "margin-bottom": "5px", "margin-left": "5px"},
+                        )
+
+                        with solara.Div(
+                            classes=["ltwr-scroll-area"],
+                            style={
+                                "flex": "1",
+                                "min-height": "0",
+                                "display": "flex",
+                                "flex-direction": "column",
+                                "gap": "12px",
+                                "overflow-y": "auto",
+                                "padding-right": "4px",
+                            },
+                        ):
+                            MapCard(map_label_1, "map_01_Tactical_Weighted_Cost_1h.html", None)
+                            MapCard(map_label_2, "map_01_Tactical_Weighted_Cost_2h.html", None)
+                            MapCard(map_label_3, "map_01_Tactical_Weighted_Cost_3h.html", None)
+                            
+                            
 # ──────────────────────────────────────────────────────────────
 # [팀원 코드] 통제관 메인 페이지
 # CommanderPage 레이아웃 그대로 사용, 통제관 전용 데이터로 변경
@@ -1784,52 +2215,103 @@ def CommanderPage():
 # 우측: LTWR 패널 기본 / 자산현황 클릭 시 자산 패널 오버레이
 # ──────────────────────────────────────────────────────────────
 
+
+
 @solara.component
 def UserPage():
     current_user = logged_in_user.value
-
-    unit_label_map = {"user1": "1제대", "user2": "2제대", "user3": "3제대"}
-    my_unit_label = unit_label_map.get(current_user, "미확인")
+    my_unit_label = {
+        "user1": "1제대",
+        "user2": "2제대",
+        "user3": "3제대",
+    }.get(current_user, "제대")
 
     run_state, set_run_state = solara.use_state("")
     show_asset_popup, set_show_asset_popup = solara.use_state(False)
-    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
-    current_time_text, set_current_time_text = solara.use_state(datetime.now().strftime("%Y.%m.%d %H:%M:%S"))
+    asset_tab, set_asset_tab = solara.use_state("부대")
+    toast_count, set_toast_count = solara.use_state(0)
 
-    def update_clock():
-        while True:
-            set_current_time_text(datetime.now().strftime("%Y.%m.%d %H:%M:%S"))
+    fixed_mission_mode = selected_mission_mode.value if selected_mission_mode.value else "균형"
+    fixed_mission_mode = _resolve_mission_mode()
+
+    MISSION_KPI_DATA = {
+        "균형": {
+            "mission_success": 98.0,
+            "worst_success": 89.0,
+            "arrived_ugv": 8.8,
+            "sos_count": 18.9,
+            "per_sos_queue": 10.0,
+            "controller_util": 27.0,
+        },
+        "신속": {
+            "mission_success": 98.0,
+            "worst_success": 78.0,
+            "arrived_ugv": 8.8,
+            "sos_count": 15.9,
+            "per_sos_queue": 9.0,
+            "controller_util": 24.0,
+        },
+        "정밀": {
+            "mission_success": 96.0,
+            "worst_success": 78.0,
+            "arrived_ugv": 8.6,
+            "sos_count": 19.4,
+            "per_sos_queue": 10.0,
+            "controller_util": 27.0,
+        },
+    }
+
+    ugv_color_map = {
+        "1제대": "rgba(249, 115, 22, 1)",
+        "2제대": "rgba(34, 211, 238, 1)",
+        "3제대": "rgba(244, 114, 182, 1)",
+    }
+
+    def update_clock(cancel):
+        while not cancel.is_set():
             time.sleep(1)
+            tick.value += 1
 
     solara.use_thread(update_clock, dependencies=[])
 
-    def start_execution():
-        set_run_state("run")
-        start_mission_timer()
+    def _load_briefing_on_mount():
+        if auth_token.value:
+            threading.Thread(target=lambda: fetch_operator_briefing(current_user), daemon=True).start()
+            from components import ws_client
+            ws_client.connect_mission(auth_token.value)
+        asset_popup_open.set(False)
 
-    def stop_execution():
-        set_run_state("stop")
-        stop_mission_timer()
+    solara.use_effect(_load_briefing_on_mount, [])
+
+    _ = tick.value
+
+    elapsed_seconds = int(time.time() - app_start_ts)
+    current_sim_time = sim_base_time + timedelta(seconds=elapsed_seconds)
+    current_time_text = current_sim_time.strftime("%Y.%m.%d %H:%M:%S")
+
+    current_arrival_times = ARRIVAL_TIMES_BY_MODE.get(fixed_mission_mode, {})
+    current_dest_map = DEST_INFO_BY_MODE.get(fixed_mission_mode, {})
+
+    my_ugv_value = _resolve_operating_ugv_count(current_user)
+    my_depart_value = _resolve_departure_time(current_user)
+    my_arrive_value = current_arrival_times.get(current_user, "-")
+    my_dest_value = current_dest_map.get(my_unit_label, "-")
+
+    my_ugv_color = ugv_color_map.get(my_unit_label, "#e67e22")
+    kpi_data = MISSION_KPI_DATA.get(fixed_mission_mode, MISSION_KPI_DATA["균형"])
+
+    map_label_1 = "h+1"
+    map_label_2 = "h+2"
+    map_label_3 = "h+3"
 
     def go_back():
         workflow_step.set(0)
 
-    delivered = mission_delivery_data.value
-    current_mission_info = delivered.get("mission_info", {}).get(current_user, {})
-    fixed_mission_mode = current_mission_info.get("mission_mode", mission_mode.value) or mission_mode.value
-
-    my_unit_row = {
-        "unit": my_unit_label,
-        "ugv": current_mission_info.get("operating_ugv_count", "-"),
-        "depart": current_mission_info.get("departure_time", "-"),
-        "arrive": current_mission_info.get("arrival_time", "-"),
-        "recon": current_mission_info.get("recon_time", "-"),
-    }
-
-    now = datetime.now()
-    map_label_1 = "1시간 뒤"
-    map_label_2 = "2시간 뒤"
-    map_label_3 = "3시간 뒤"
+    def confirm_mission():
+        try:
+            set_toast_count(int(toast_count) + 1)
+        except Exception:
+            set_toast_count(1)
 
     solara.Style("""
         .status-item-box > div, .status-item-box .v-sheet,
@@ -1863,42 +2345,39 @@ def UserPage():
         .page-shell {
             width: 100%;
             height: 100%;
+            min-height: 0;
             display: grid;
             grid-template-columns: 380px minmax(0, 1fr) 390px;
-            grid-template-rows: auto minmax(0, 1fr);
+            grid-template-rows: auto 1fr;
             column-gap: 12px;
-            row-gap: 8px;
+            row-gap: 4px;
             box-sizing: border-box;
+        }
+
+        .page-shell > * {
             min-height: 0;
         }
 
         .top-left-panel {
             grid-column: 1;
             grid-row: 1;
-            align-self: start;
+            align-self: stretch;
             background-color: rgba(22, 34, 56, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.55) !important;
             border-radius: 16px;
-            padding: 10px;
+            padding: 8px;
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 5px;
             box-sizing: border-box;
-            min-height: 0;
-        }
-
-        .center-column {
-            grid-column: 2;
-            grid-row: 1 / 3;
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-            gap: 12px;
         }
 
         .top-right-panel {
+            grid-column: 2;
+            grid-row: 1;
             width: 100%;
-            align-self: start;
+            min-height: 0;
+            height: 100%;
             justify-self: stretch;
             background-color: rgba(22, 34, 56, 0.82) !important;
             border: 1px solid rgba(45, 58, 84, 0.55) !important;
@@ -1909,8 +2388,6 @@ def UserPage():
             justify-content: center;
             box-sizing: border-box;
             overflow: hidden;
-            min-height: 0;
-            flex-shrink: 0;
         }
 
         .top-user-row {
@@ -1919,163 +2396,36 @@ def UserPage():
             gap: 8px;
         }
 
-        .home-btn {
-            min-width: 72px !important;
-            height: 38px !important;
-            background-color: #0f172a !important;
-            color: white !important;
-            border-radius: 10px !important;
-            font-size: 13px !important;
-            font-weight: 700 !important;
-            padding: 0 12px !important;
-        }
-
-        .back-nav-btn {
-            min-width: 38px !important;
-            width: 38px !important;
-            height: 38px !important;
-            background-color: #0f172a !important;
-            color: white !important;
-            border-radius: 10px !important;
-            font-size: 18px !important;
-            font-weight: 700 !important;
-            padding: 0 !important;
-        }
-
-        .v-btn.user-role-tab {
-            min-width: 100px !important;
-            height: 38px !important;
-            border-radius: 10px !important;
-            font-size: 15px !important;
-            font-weight: 700 !important;
-            padding: 0 12px !important;
-            background-color: #0f172a !important;
-            color: white !important;
-            border: 2px solid #f59e0b !important;
-        }
-
-        .asset-tab-btn {
-            flex: 1;
-            height: 38px !important;
-            border-radius: 10px !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            background-color: #203250 !important;
-            color: white !important;
-            padding: 0 10px !important;
-        }
-
-        .mission-mode-card-inline {
-            background-color: rgba(15, 23, 38, 0.82) !important;
-            border: 1px solid rgba(45, 58, 84, 0.45) !important;
-            border-radius: 13px;
-            padding: 9px 10px;
-            display: flex;
-            flex-direction: row;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-            box-sizing: border-box;
-            flex-wrap: nowrap;
-        }
-
-        .mode-title-inline {
-            color: #94a3b8 !important;
-            font-size: 12px !important;
-            font-weight: 700 !important;
-            white-space: nowrap;
-            flex: 0 0 auto;
-            margin: 0 !important;
-        }
-
-        .mode-btn-row-inline {
-            display: flex;
-            flex-direction: row;
-            align-items: center;
-            justify-content: flex-end;
-            gap: 6px;
-            flex: 1 1 auto;
-            min-width: 0;
-            flex-wrap: nowrap;
-        }
-
-        .single-mode-btn {
-            min-width: 92px !important;
-            height: 34px !important;
-            border-radius: 9px !important;
-            font-size: 14px !important;
-            font-weight: 800 !important;
-            padding: 0 14px !important;
-            background-color: #e67e22 !important;
-            color: white !important;
-        }
-
-        .current-time-card-inline {
-            margin-top: auto;
-            background-color: rgba(15, 23, 38, 0.82) !important;
-            border: 1px solid rgba(45, 58, 84, 0.45) !important;
-            border-radius: 13px;
-            padding: 10px 12px;
-            display: flex;
-            flex-direction: row;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            box-sizing: border-box;
-            flex-wrap: nowrap;
-        }
-
-        .current-time-label-inline {
-            color: #94a3b8 !important;
-            font-size: 12px !important;
-            font-weight: 700 !important;
-            white-space: nowrap;
-            flex: 0 0 auto;
-            margin: 0 !important;
-        }
-
-        .current-time-value-inline {
-            color: white !important;
-            font-size: 18px !important;
-            font-weight: 800 !important;
-            margin-left: auto;
-            text-align: right;
-            white-space: nowrap;
-            flex: 0 0 auto;
-            line-height: 1.2;
-            letter-spacing: 0.2px;
-        }
-
         .unit-summary-header, .unit-summary-row {
             display: flex;
             align-items: center;
             justify-content: space-between;
             width: 100%;
             gap: 8px;
+            padding-left: 6px;
+            padding-right: 8px;
+            box-sizing: border-box;
         }
 
         .unit-summary-header {
-            padding: 0 0 5px 0;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.16);
-            margin-bottom: 2px;
+            padding: 0 0 6px 0;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.20);
+            margin-bottom: 4px;
         }
 
         .unit-summary-row {
-            padding: 5px 0;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.08);
-        }
-
-        .unit-summary-row:last-child {
+            padding: 7px 0;
             border-bottom: none;
         }
 
         .col-unit {
-            flex: 0.9;
+            flex: 1.0;
             min-width: 0;
             display: flex;
             align-items: center;
-            justify-content: center;
-            text-align: center;
+            justify-content: flex-start;
+            text-align: left;
+            padding-left: 20px;
         }
 
         .col-ugv {
@@ -2088,7 +2438,16 @@ def UserPage():
         }
 
         .col-time {
-            flex: 1.25;
+            flex: 1.35;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+
+        .col-dest {
+            flex: 1.6;
             min-width: 0;
             display: flex;
             align-items: center;
@@ -2098,80 +2457,41 @@ def UserPage():
 
         .summary-head-text {
             color: #94a3b8 !important;
-            font-size: 10.5px !important;
-            font-weight: 700 !important;
+            font-size: 12px !important;
+            font-weight: 800 !important;
             white-space: nowrap;
-            letter-spacing: -0.2px;
+            letter-spacing: -0.1px;
             text-align: center;
             width: 100%;
         }
 
         .summary-unit-text {
             color: #d1d5db !important;
-            font-size: 13px !important;
+            font-size: 14px !important;
+            font-weight: 800 !important;
+            white-space: nowrap;
+            text-align: left;
+            width: 100%;
+        }
+
+        .summary-value-text {
+            color: white !important;
+            font-size: 14px !important;
             font-weight: 700 !important;
             white-space: nowrap;
             text-align: center;
             width: 100%;
         }
 
-        .summary-value-text {
-            color: white !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
-            white-space: nowrap;
-            text-align: center;
-            width: 100%;
-        }
-
-        .ugv-badge {
-            width: 30px;
-            height: 24px;
-            border-radius: 7px;
-            background: #e67e22;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: 800;
-            font-size: 14px;
-            margin: 0 auto;
-        }
-
-        .left-sub-sidebar {
-            position: relative;
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            min-height: 0;
-            overflow: hidden;
-        }
-
-        .asset-popup-overlay-left {
-            position: absolute;
-            inset: 0;
-            z-index: 1000;
-            display: flex;
-            border-radius: 12px;
-        }
-
-        .sub-inner-card {
-            background-color: rgba(15, 23, 38, 0.8) !important;
-            border: 1px solid rgba(45, 58, 84, 0.5) !important;
-            border-radius: 12px;
-            padding: 15px;
-            display: flex;
-            flex-direction: column;
-            box-sizing: border-box;
-        }
-
         .center-map-area {
-            flex: 1;
-            min-width: 0;
+            grid-column: 1 / 3;
+            grid-row: 2;
             min-height: 0;
+            height: 100%;
             display: flex;
             flex-direction: column;
+            align-self: stretch;
+            width: 100%;
             background-color: rgba(15, 23, 38, 0.72) !important;
             border: 1px solid rgba(45, 58, 84, 0.5) !important;
             border-radius: 12px;
@@ -2192,7 +2512,8 @@ def UserPage():
             background: transparent !important;
         }
 
-        .center-map-inner > div, .center-map-inner .v-sheet {
+        .center-map-inner > div,
+        .center-map-inner .v-sheet {
             flex: 1 1 auto;
             min-height: 0;
             height: 100%;
@@ -2211,43 +2532,47 @@ def UserPage():
             grid-row: 1 / 3;
             min-width: 0;
             min-height: 0;
+            height: 100%;
             display: flex;
             flex-direction: column;
             background-color: rgba(11, 20, 38, 0.96) !important;
             border: 1px solid rgba(45, 58, 84, 0.8) !important;
             border-radius: 12px;
-            padding: 14px;
+            padding: 5px 1px 5px 10px;
             box-sizing: border-box;
             overflow-y: auto;
             scrollbar-gutter: stable;
         }
 
-        .right-sidebar-area::-webkit-scrollbar { width: 10px; }
+        .right-sidebar-area::-webkit-scrollbar {
+            width: 10px;
+        }
+
         .right-sidebar-area::-webkit-scrollbar-track {
             background: rgba(30, 41, 59, 0.95);
             border-radius: 999px;
         }
+
         .right-sidebar-area::-webkit-scrollbar-thumb {
             background: rgba(148, 163, 184, 0.35);
             border-radius: 999px;
             border: 2px solid rgba(30, 41, 59, 0.95);
         }
+
         .right-sidebar-area::-webkit-scrollbar-thumb:hover {
             background: rgba(203, 213, 225, 0.55);
         }
 
-        .ltwr-scroll-area::-webkit-scrollbar { width: 10px; }
-        .ltwr-scroll-area::-webkit-scrollbar-track {
-            background: rgba(30, 41, 59, 0.95);
-            border-radius: 999px;
+        .right-top-panel,
+        .right-bottom-panel {
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
         }
-        .ltwr-scroll-area::-webkit-scrollbar-thumb {
-            background: rgba(148, 163, 184, 0.35);
-            border-radius: 999px;
-            border: 2px solid rgba(30, 41, 59, 0.95);
-        }
-        .ltwr-scroll-area::-webkit-scrollbar-thumb:hover {
-            background: rgba(203, 213, 225, 0.55);
+
+        .card-label {
+            color: #94a3b8 !important;
+            font-size: 14px;
+            font-weight: bold;
+            margin-bottom: 8px;
         }
 
         .map-card-container {
@@ -2289,138 +2614,44 @@ def UserPage():
             font-size: 16px !important;
         }
 
-        .card-label {
-            color: #94a3b8 !important;
-            font-size: 14px;
-            font-weight: bold;
-            margin-bottom: 8px;
-        }
-
-        .metric-card {
-            background-color: rgba(15, 23, 38, 0.8) !important;
-            border: 1px solid rgba(45, 58, 84, 0.5) !important;
-            border-radius: 12px;
-            padding: 16px 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            box-sizing: border-box;
-        }
-
-        .metric-label {
-            color: #94a3b8 !important;
-            font-size: 13px !important;
-            font-weight: 700 !important;
-        }
-
-        .metric-value-row {
-            display: flex;
-            align-items: flex-end;
-            gap: 4px;
-        }
-
-        .metric-value {
-            color: white !important;
-            font-size: 30px !important;
-            font-weight: 800 !important;
-            line-height: 1.1;
-        }
-
-        .metric-unit-inline {
-            color: #6b7280 !important;
-            font-size: 18px !important;
-            font-weight: 800 !important;
-            line-height: 1.1;
-            padding-bottom: 2px;
-        }
-
-        .metric-header-row {
+        .mission-toast {
+            position: fixed;
+            bottom: 36px;
+            left: 50%;
+            background: rgba(30, 41, 59, 0.96);
+            border: 1px solid rgba(255, 61, 154, 0.55);
+            border-radius: 10px;
+            padding: 12px 28px;
+            color: white;
+            font-size: 15px;
+            font-weight: 600;
+            z-index: 9999;
+            box-shadow: 0 4px 24px rgba(255, 61, 154, 0.25);
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-        }
-
-        .metric-value-inline {
-            display: flex;
-            align-items: baseline;
-            gap: 4px;
-            flex-shrink: 0;
-        }
-
-        .control-btn-card {
-            background-color: rgba(15, 23, 38, 0.8) !important;
-            border: 1px solid rgba(45, 58, 84, 0.5) !important;
-            border-radius: 12px;
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
             gap: 10px;
-            box-sizing: border-box;
-            flex-shrink: 0;
-            margin-top: auto;
+            pointer-events: none;
+            animation: toast-lifecycle 2.5s ease forwards;
         }
 
-        .control-btn-row {
-            display: flex;
-            gap: 10px;
-            width: 100%;
-        }
-
-        .run-btn, .stop-btn {
-            flex: 1;
-            height: 34px !important;
-            border-radius: 8px !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            padding: 0 !important;
-        }
-
-        .btn-selected { background-color: #e68a00 !important; color: white !important; }
-        .btn-unselected { background-color: #0f172a !important; color: white !important; }
-
-        .confirm-btn {
-            width: 100%;
-            height: 34px !important;
-            border-radius: 8px !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            background: linear-gradient(90deg, #ff3d9a 0%, #ff2f7f 100%) !important;
-            color: white !important;
-            padding: 0 !important;
-        }
-
-        .asset-popup-panel {
-            width: 100%;
-            height: 100%;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-            background-color: rgba(15, 23, 38, 1) !important;
-            border: 1px solid rgba(45, 58, 84, 0.5) !important;
-            border-radius: 12px;
-            padding: 8px 6px;
-            box-sizing: border-box;
-            overflow: hidden;
-        }
-
-        .asset-popup-left-overlay {
-            position: absolute;
-            inset: 0;
-            z-index: 25;
+        @keyframes toast-lifecycle {
+            0%   { opacity: 0; transform: translateX(-50%) translateY(12px); }
+            12%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+            75%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+            100% { opacity: 0; transform: translateX(-50%) translateY(0); }
         }
 
         .asset-popup-header {
             display: flex;
             align-items: center;
             justify-content: space-between;
-            margin-bottom: 10px;
-            padding: 0 4px;
+            margin-bottom: 3px;
+            padding: 6px 6px 2px 8px;
             flex-shrink: 0;
         }
 
         .asset-popup-title {
-            color: #e5e7eb !important;
+            color: #94a3b8 !important;
             font-size: 20px !important;
             font-weight: 800 !important;
         }
@@ -2470,77 +2701,188 @@ def UserPage():
             padding: 0 !important;
         }
 
-        .asset-tab-btn2-active { background-color: #2f4b78 !important; color: #f8fafc !important; }
+        .asset-tab-btn2-active  { background-color: #2f4b78 !important; color: #f8fafc !important; }
         .asset-tab-btn2-default { background-color: #1b2c47 !important; color: #d1d5db !important; }
 
         .asset-tab-content {
             flex: 1;
             min-height: 0;
-            height: 100%;
+            padding-top: 8px;
+            padding-bottom: 8px;
             overflow-y: auto;
-            padding-right: 4px;
+            padding-right: 5px;
+            scrollbar-width: thin;
+            scrollbar-color: #4b6387 #162133;
+        }
+
+        .current-time-card-inline {
+            margin-top: auto;
+            background-color: rgba(15, 23, 38, 0.82) !important;
+            border: 1px solid rgba(45, 58, 84, 0.45) !important;
+            border-radius: 13px;
+            padding: 9px 10px;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            box-sizing: border-box;
+            flex-wrap: nowrap;
+        }
+
+        .current-time-label-inline {
+            color: #94a3b8 !important;
+            font-size: 12px !important;
+            font-weight: 700 !important;
+            white-space: nowrap;
+            flex: 0 0 auto;
+            margin: 0 !important;
+        }
+
+        .current-time-value-inline {
+            color: white !important;
+            font-size: 18px !important;
+            font-weight: 800 !important;
+            margin-left: auto;
+            text-align: right;
+            white-space: nowrap;
+            flex: 0 0 auto;
+            line-height: 1.2;
+            letter-spacing: 0.2px;
+        }
+
+        .home-btn {
+            min-width: 60px !important;
+            height: 32px !important;
+            background-color: #0f172a !important;
+            color: white !important;
+            border-radius: 10px !important;
+            font-size: 13px !important;
+            font-weight: 700 !important;
+            padding: 0 8px !important;
+        }
+
+        .back-nav-btn {
+            min-width: 32px !important;
+            width: 32px !important;
+            height: 32px !important;
+            background-color: #0f172a !important;
+            color: white !important;
+            border-radius: 10px !important;
+            font-size: 18px !important;
+            font-weight: 700 !important;
+            padding: 0 !important;
+        }
+
+        .v-btn.user-role-tab {
+            min-width: 80px !important;
+            height: 32px !important;
+            border-radius: 10px !important;
+            font-size: 15px !important;
+            font-weight: 700 !important;
+            padding: 0 12px !important;
+            background-color: #0f172a !important;
+            color: white !important;
+            border: 2px solid #f59e0b !important;
+        }
+
+        .asset-tab-btn {
+            flex: 1;
+            height: 32px !important;
+            border-radius: 10px !important;
+            font-size: 14px !important;
+            font-weight: 700 !important;
+            background-color: #203250 !important;
+            color: white !important;
+            padding: 0 10px !important;
+        }
+
+        .mission-mode-card-inline {
+            background-color: rgba(15, 23, 38, 0.82) !important;
+            border: 1px solid rgba(45, 58, 84, 0.45) !important;
+            border-radius: 13px;
+            padding: 6px 8px;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            box-sizing: border-box;
+            flex-wrap: nowrap;
+        }
+
+        .mode-title-inline {
+            color: #94a3b8 !important;
+            font-size: 12px !important;
+            font-weight: 700 !important;
+            white-space: nowrap;
+            flex: 0 0 auto;
+            margin: 0 !important;
+        }
+
+        .mode-btn-row-inline {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 6px;
+            flex: 1 1 auto;
+            min-width: 0;
+            flex-wrap: nowrap;
+        }
+
+        .single-mode-btn {
+            min-width: 88px !important;
+            height: 30px !important;
+            border-radius: 9px !important;
+            font-size: 14px !important;
+            font-weight: 700 !important;
+            padding: 0 14px !important;
+            background-color: #e67e22 !important;
+            color: white !important;
+        }
+
+        .asset-popup-overlay-right {
+            position: absolute;
+            inset: 0;
+            z-index: 30;
+            display: flex;
+            background: rgba(15, 23, 38, 0.72);
+            border-radius: 12px;
+        }
+
+        .asset-popup-panel-right {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            background: #0f1726;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            box-sizing: border-box;
         }
 
         .asset-form-card {
             background: rgba(30, 41, 59, 0.55);
             border: 1px solid rgba(148, 163, 184, 0.12);
             border-radius: 14px;
-            padding: 14px 12px;
+            padding: 14px 16px 10px;
             display: flex;
             flex-direction: column;
-            justify-content: flex-start;
-            gap: 1px;
-            height: 100%;
+            justify-content: flex-start; gap: 2px;
         }
 
-        .asset-form-title {
-            color: #e5e7eb !important;
-            font-size: 15px !important;
-            font-weight: 800 !important;
-            margin-bottom: 4px;
-        }
+        .asset-form-title { color: #e5e7eb !important; font-size: 15px !important; font-weight: 800 !important; margin-bottom: 4px; }
 
         .asset-form-row {
-            display: grid;
-            grid-template-columns: 130px 1fr;
-            align-items: center;
-            gap: 12px;
-            min-height: 56px;
+            display: grid; grid-template-columns: 130px 1fr;
+            align-items: center; gap: 10px; min-height: 55px;
         }
 
         .asset-form-label {
-            color: #d1d5db !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            line-height: 1;
-            display: flex;
-            align-items: center;
-            height: 100%;
-        }
-
-        .asset-form-action-row {
-            display: flex;
-            gap: 10px;
-            margin-top: auto;
-        }
-
-        .asset-save-btn {
-            flex: 1;
-            height: 38px !important;
-            border-radius: 8px !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            background-color: #f59e0b !important;
-            color: white !important;
-        }
-        .asset-cancel-btn {
-            flex: 1;
-            height: 38px !important;
-            border-radius: 8px !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            background-color: #f59e0b !important;
-            color: white !important;
+            color: #d1d5db !important; font-size: 14px !important;
+            font-weight: 700 !important; line-height: 1;
+            display: flex; align-items: center; height: 100%;
         }
 
         .asset-form-card input {
@@ -2550,352 +2892,368 @@ def UserPage():
         }
 
         .asset-form-card .v-input {
-            margin-top: 0 !important;
-            padding-top: 0 !important;
-            display: flex !important;
-            align-items: center !important;
+            margin-top: 0 !important; padding-top: 0 !important;
+            display: flex !important; align-items: center !important;
         }
 
-        .asset-form-card .v-input__control {
-            min-height: 44px !important;
-        }
+        .asset-form-card .v-input__control { min-height: 44px !important; }
 
         .asset-form-card .v-input__slot,
         .asset-form-card .v-text-field > .v-input__control > .v-input__slot {
-            min-height: 44px !important;
-            display: flex !important;
-            align-items: center !important;
-            padding: 0 10px !important;
+            min-height: 44px !important; display: flex !important;
+            align-items: center !important; padding: 0 10px !important;
         }
 
-        .queue-danger-item {
-            background-color: rgba(245, 158, 11, 0.35) !important;
-            border: 1px solid rgba(245, 158, 11, 0.55) !important;
+        .ltwr-scroll-area::-webkit-scrollbar {
+            width: 10px;
         }
 
-        .status-item-box > div, .status-item-box .v-sheet,
-        .sub-inner-card > div:not(.queue-danger-item), .sub-inner-card .v-sheet,
-        .center-map-area > div, .center-map-area .v-sheet,
-        .right-sidebar-area > div, .right-sidebar-area .v-sheet {
-            background-color: transparent !important;
+        .ltwr-scroll-area::-webkit-scrollbar-track {
+            background: rgba(30, 41, 59, 0.95);
+            border-radius: 999px;
         }
 
-        .queue-summary-title {
-            color: #94a3b8 !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            margin: 0 !important;
-            line-height: 1.2;
+        .ltwr-scroll-area::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.35);
+            border-radius: 999px;
+            border: 2px solid rgba(30, 41, 59, 0.95);
         }
 
-        .queue-summary-subtitle {
-            color: #64748b !important;
-            font-size: 11px !important;
-            font-weight: 600 !important;
-            margin: 2px 0 0 0 !important;
-            line-height: 1.2;
-        }
-
-        .queue-summary-row {
-            display: flex;
-            align-items: baseline;
-            gap: 10px;
-            margin-top: 10px;
-            min-width: 0;
-            overflow: hidden;
-        }
-
-        .queue-summary-chip {
-            min-width: 98px;
-            height: 32px;
-            padding: 0 12px;
-            border-radius: 10px;
-            background-color: rgba(245, 158, 11, 0.22) !important;
-            border: 1px solid rgba(245, 158, 11, 0.42) !important;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-            box-sizing: border-box;
-            flex-shrink: 0;
-        }
-
-        .queue-summary-chip-id {
-            color: #f8fafc !important;
-            font-size: 13px !important;
-            font-weight: 700 !important;
-            white-space: nowrap;
-        }
-
-        .queue-summary-chip-dist {
-            color: #f8fafc !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
-            white-space: nowrap;
-        }
-
-        .queue-summary-empty {
-            color: #64748b !important;
-            font-size: 12px !important;
-            margin-top: 10px !important;
-        }        
-        
-        .unit-info-fill-card {
-            flex: 1 1 auto;
-            min-height: 0;
-            background-color: rgba(15, 23, 38, 0.8) !important;
-            border: 1px solid rgba(45, 58, 84, 0.5) !important;
-            border-radius: 12px;
-            padding: 14px 16px;
-            display: flex;
-            flex-direction: column;
-            box-sizing: border-box;
-            overflow: hidden;
-        }
-
-        .unit-info-fill-title {
-            color: #94a3b8 !important;
-            font-size: 13px !important;
-            font-weight: 700 !important;
-            margin: 0 0 8px 0 !important;
-            flex-shrink: 0;
-        }
-
-        .unit-info-fill-body {
-            flex: 1 1 auto;
-            min-height: 0;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-around;
-        }
-
-        .unit-info-row {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-        }
-
-        .unit-info-row:last-child {
-            border-bottom: none;
-        }
-
-        .unit-info-key {
-            color: #94a3b8 !important;
-            font-size: 13px !important;
-            font-weight: 600 !important;
-            white-space: nowrap;
-        }
-
-        .unit-info-val {
-            color: white !important;
-            font-size: 14px !important;
-            font-weight: 700 !important;
-            text-align: right;
-            white-space: nowrap;
-        }
-
-        .ugv-badge-inline {
-            min-width: 32px;
-            height: 24px;
-            border-radius: 7px;
-            background: #e67e22;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            font-weight: 800;
-            font-size: 14px;
-            padding: 0 8px;
-        }
-
-        .queue-summary-header-row {
-            display: flex;
-            align-items: baseline;
-            gap: 8px;
-            margin-bottom: 0;
+        .ltwr-scroll-area::-webkit-scrollbar-thumb:hover {
+            background: rgba(203, 213, 225, 0.55);
         }
     """)
+    
+    
+    current_user = logged_in_user.value
+    user_label = "통제관"
+
+    toast_initialized, set_toast_initialized = solara.use_state(False)
+
+    if not toast_initialized:
+        mission_toast_count.value = 0
+        mission_toast_message.value = ""
+        set_toast_initialized(True)
 
     with solara.Div(classes=["page-root"]):
-        with solara.Div(classes=["page-shell"]):
-            with solara.Div(classes=["top-left-panel"]):
-                with solara.Div(classes=["top-user-row"]):
-                    solara.Button("HOME", on_click=go_home, classes=["home-btn"])
-                    solara.Button("←", on_click=go_back, classes=["back-nav-btn"])
-                    solara.Button("통제관", classes=["user-role-tab"])
-                    solara.Button(
-                        "자산 현황",
-                        on_click=lambda: set_show_asset_popup(not show_asset_popup),
-                        classes=["asset-tab-btn"],
-                    )
+        if mission_toast_count.value > 0:
+            solara.HTML(
+                tag="div",
+                unsafe_innerHTML=f"✅&nbsp;&nbsp;{mission_toast_message.value}",
+                attributes={"class": "mission-toast"},
+            )
 
-                with solara.Div(classes=["mission-mode-card-inline"]):
-                    solara.Text("임무 모드", classes=["mode-title-inline"])
-                    with solara.Div(classes=["mode-btn-row-inline"]):
-                        solara.Button(fixed_mission_mode, classes=["single-mode-btn"])
+        with solara.Div(classes=["page-shell"], style={
+            "display": "grid",
+            "grid-template-columns": "380px minmax(0, 1fr) 390px",
+            "grid-template-rows": "auto 1fr",
+            "column-gap": "12px",
+            "row-gap": "4px",
+            "height": "100%",
+            "min-height": "0",
+            "padding": "0",
+            "box-sizing": "border-box",
+        }):
+            # 좌측 상단
+            with solara.Div(style={
+                "grid-column": "1",
+                "grid-row": "1",
+                "display": "flex",
+                "flex-direction": "column",
+                "min-height": "0",
+            }):
+                with solara.Div(classes=["top-left-panel"], style={"width": "100%", "height": "100%"}):
+                    with solara.Div(classes=["top-user-row"]):
+                        solara.Button("HOME", on_click=go_home, classes=["home-btn"])
+                        solara.Button("←", on_click=go_back, classes=["back-nav-btn"])
+                        solara.Button(my_unit_label, classes=["user-role-tab"])
+                        solara.Button(
+                            "자산 현황",
+                            on_click=lambda: asset_popup_open.set(not asset_popup_open.value),
+                            classes=["asset-tab-btn"],
+                        )
 
-                with solara.Div(classes=["current-time-card-inline"]):
-                    solara.Text("현재 시각", classes=["current-time-label-inline"])
-                    solara.Text(current_time_text, classes=["current-time-value-inline"])
+                    with solara.Div(classes=["mission-mode-card-inline"]):
+                        solara.Text("임무 모드", classes=["mode-title-inline"])
+                        with solara.Div(classes=["mode-btn-row-inline"]):
+                            solara.Button(fixed_mission_mode, classes=["single-mode-btn"])
 
-            with solara.Div(classes=["left-sub-sidebar"]):
-                if show_asset_popup:
-                    with solara.Div(classes=["asset-popup-overlay-left"]):
-                        with solara.Div(classes=["asset-popup-panel"], style={"flex": "1"}):
-                            with solara.Div(classes=["asset-popup-header"]):
-                                solara.Text("기본자산", classes=["asset-popup-title"])
-                                solara.Button(
-                                    "✕",
-                                    on_click=lambda: set_show_asset_popup(False),
-                                    classes=["asset-popup-close-btn"],
-                                )
+                    with solara.Div(classes=["current-time-card-inline"]):
+                        solara.Text("현재 시각", classes=["current-time-label-inline"])
+                        SimulationClockText(classes=["current-time-value-inline"])
 
-                            with solara.Div(classes=["asset-popup-body"]):
-                                with solara.Div(classes=["asset-tab-col"]):
-                                    for tab_name, label in [
-                                        ("부대 기본자산", "부대"),
-                                        (f"{my_unit_label} 기본자산", my_unit_label),
-                                    ]:
-                                        solara.Button(
-                                            label,
-                                            on_click=lambda t=tab_name: set_asset_tab(t),
-                                            classes=[
-                                                "asset-tab-btn2",
-                                                "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
-                                            ],
-                                        )
+            # 센터 상단
+            with solara.Div(style={
+                "grid-column": "2",
+                "grid-row": "1",
+                "display": "flex",
+                "flex-direction": "column",
+                "min-height": "0",
+            }):
+                with solara.Div(classes=["top-right-panel"], style={"margin-bottom": "0px"}):
+                    with solara.Div(classes=["unit-summary-header"]):
+                        with solara.Div(classes=["col-unit"]):
+                            solara.Text("", classes=["summary-head-text"])
+                        with solara.Div(classes=["col-ugv"]):
+                            solara.Text("운용 UGV 수", classes=["summary-head-text"])
+                        with solara.Div(classes=["col-dest"]):
+                            solara.Text("도착지 정보", classes=["summary-head-text"])
+                        with solara.Div(classes=["col-time"]):
+                            solara.Text("출발 예정 시각", classes=["summary-head-text"])
+                        with solara.Div(classes=["col-time"]):
+                            solara.Text("도착 예정 시각", classes=["summary-head-text"])
 
-                                with solara.Div(classes=["asset-tab-content"]):
-                                    if asset_tab == "부대 기본자산":
-                                        BaseAssetEditor()
-                                    else:
-                                        UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
+                    with solara.Div(classes=["unit-summary-row"]):
+                        with solara.Div(classes=["col-unit"]):
+                            solara.Text(my_unit_label, classes=["summary-unit-text"])
 
-                _my_kpi = unit_kpi_data.value.get(current_user, {"success": 0, "risk": 0})
-
-                with solara.Div(classes=["metric-card"]):
-                    with solara.Div(classes=["metric-header-row"]):
-                        solara.Text(f"{my_unit_label} 임무 성공률", classes=["metric-label"])
-                        with solara.Div(classes=["metric-value-inline"]):
-                            solara.Text(str(_my_kpi["success"]), classes=["metric-value"])
-                            solara.Text("%", classes=["metric-unit-inline"])
-
-                with solara.Div(classes=["metric-card"]):
-                    with solara.Div(classes=["metric-header-row"]):
-                        solara.Text(f"{my_unit_label} 임무 위험률", classes=["metric-label"])
-                        with solara.Div(classes=["metric-value-inline"]):
-                            solara.Text(str(_my_kpi["risk"]), classes=["metric-value"])
-                            solara.Text("%", classes=["metric-unit-inline"])
-                
-                with solara.Div(classes=["unit-info-fill-card"]):
-                    solara.Text(f"{my_unit_label} 운용 정보", classes=["unit-info-fill-title"])
-
-                    with solara.Div(classes=["unit-info-fill-body"]):
-                        with solara.Div(classes=["unit-info-row"]):
-                            solara.Text("운용 UGV 수", classes=["unit-info-key"])
+                        with solara.Div(classes=["col-ugv"]):
                             solara.HTML(
                                 tag="div",
-                                unsafe_innerHTML=f"<span class='ugv-badge-inline'>{my_unit_row['ugv']}</span>",
+                                unsafe_innerHTML=(
+                                    "<div style='width:32px;height:26px;border-radius:7px;"
+                                    f"background:{my_ugv_color};display:flex;align-items:center;justify-content:center;"
+                                    "color:white;font-weight:800;font-size:15px;margin:0 auto;'>"
+                                    f"{my_ugv_value}</div>"
+                                ),
                             )
 
-                        with solara.Div(classes=["unit-info-row"]):
-                            solara.Text("출발 예정 시각", classes=["unit-info-key"])
-                            solara.Text(str(my_unit_row["depart"]), classes=["unit-info-val"])
+                        with solara.Div(classes=["col-dest"]):
+                            solara.Text(str(my_dest_value), classes=["summary-value-text"])
 
-                        with solara.Div(classes=["unit-info-row"]):
-                            solara.Text("도착 예정 시각", classes=["unit-info-key"])
-                            solara.Text(str(my_unit_row["arrive"]), classes=["unit-info-val"])
+                        with solara.Div(classes=["col-time"]):
+                            solara.Text(str(my_depart_value), classes=["summary-value-text"])
 
-                        with solara.Div(classes=["unit-info-row"]):
-                            solara.Text("정찰 예정 시간", classes=["unit-info-key"])
-                            solara.Text(str(my_unit_row["recon"]), classes=["unit-info-val"])
-                            
-                # ── 3) 대기열 카드 (이제는 왼쪽에서 중간이 아니라, 센터에서 내려와서 아래쪽으로 유지할 수도 있음)
-                # with solara.Div(classes=["sub-inner-card"], style={"flex": "1", "min-height": "0"}):
-                #     solara.Text("대기열", classes=["card-label"])
-                #     solara.Text(
-                #         "UGV's in danger",
-                #         style={"font-size": "12px", "color": "#64748b", "margin-top": "-8px"},
-                #     )
+                        with solara.Div(classes=["col-time"]):
+                            solara.Text(str(my_arrive_value), classes=["summary-value-text"])
 
-                #     for item in queue_data.value[:4]:
-                #         with solara.Div(
-                #             classes=["queue-danger-item"],
-                #             style={
-                #                 "border-radius": "8px",
-                #                 "padding": "10px 12px",
-                #                 "margin-top": "10px",
-                #                 "display": "flex",
-                #                 "justify-content": "space-between",
-                #                 "align-items": "center",
-                #             },
-                #         ):
-                #             solara.Text(
-                #                 item["id"],
-                #                 style={"font-weight": "bold", "color": "white", "font-size": "14px"},
-                #             )
-                #             solara.Text(
-                #                 item["dist"],
-                #                 style={"color": "white", "font-size": "14px", "font-weight": "600"},
-                #             )
-            
-
-                with solara.Div(classes=["control-btn-card"]):
-                    with solara.Div(classes=["control-btn-row"]):
-                        solara.Button(
-                            "실행",
-                            on_click=start_execution,
-                            classes=["run-btn", "btn-selected" if run_state == "run" else "btn-unselected"],
-                        )
-                        solara.Button(
-                            "종료",
-                            on_click=stop_execution,
-                            classes=["stop-btn", "btn-selected" if run_state == "stop" else "btn-unselected"],
-                        )
-                    solara.Button("확인 완료", on_click=lambda: None, classes=["confirm-btn"])
-
-            with solara.Div(classes=["center-column"]):
-                with solara.Div(classes=["top-right-panel"]):
-                    with solara.Div(classes=["queue-summary-header-row"]):
-                        solara.Text("대기열 ", classes=["queue-summary-title"])
-                        solara.Text(" UGV's in danger", classes=["queue-summary-subtitle"])
-
-                    if queue_data.value:
-                        with solara.Div(classes=["queue-summary-row"]):
-                            for item in queue_data.value[:4]:
-                                with solara.Div(classes=["queue-summary-chip"]):
-                                    solara.Text(item["id"], classes=["queue-summary-chip-id"])
-                                    solara.Text(item["dist"], classes=["queue-summary-chip-dist"])
-                    else:
-                        solara.Text("위험 대기열이 없습니다.", classes=["queue-summary-empty"])
-                
-                with solara.Div(classes=["center-map-area"]):
-                    with solara.Div(classes=["center-map-inner"]):
-                        GridView()
-
-            with solara.Div(classes=["right-sidebar-area"]):
-                solara.Text("Weather Risk Map", classes=["card-label"], style={"font-size": "18px", "margin-bottom": "15px"})
-                with solara.Div(
-                    classes=["ltwr-scroll-area"],
-                    style={
+            # 센터 맵 (통제관일 때만 하단에 임무 확인 버튼)
+            with solara.Div(style={
+                "grid-column": "1 / 3",
+                "grid-row": "2",
+                "display": "flex",
+                "flex-direction": "column",
+                "min-height": "0",
+            }):
+                with solara.Div(classes=["center-map-area"], style={
+                    "flex": "1",
+                    "display": "flex",
+                    "flex-direction": "column",
+                    "min-height": "0",
+                }):
+                    with solara.Div(classes=["center-map-inner"], style={
                         "flex": "1",
                         "display": "flex",
                         "flex-direction": "column",
-                        "gap": "12px",
-                        "overflow-y": "auto",
-                        "padding-right": "4px",
-                    },
-                ):
-                    MapCard(map_label_1, "map_05_Tactical_Time_T1.html", None)
-                    MapCard(map_label_2, "map_06_Tactical_Time_T2.html", None)
-                    MapCard(map_label_3, "map_07_Tactical_Time_T3.html", None)
+                    }):
+                        GridView(current_user=current_user, mode_override=fixed_mission_mode)
+
+                    # 통제관( user1/2/3 )일 때만 센터 맵 하단에 표시
+                    # if current_user in ["user1", "user2", "user3"]:
+                    #     with solara.Div(style={
+                    #         "margin-top": "8px",
+                    #         "display": "flex",
+                    #         "justify-content": "flex-end",
+                    #     }):
+                    #         solara.Button(
+                    #             "임무 확인",
+                    #             on_click=confirm_mission,
+                    #             style={
+                    #                 "background": "#ff2f7f",
+                    #                 "color": "white",
+                    #                 "font-weight": "700",
+                    #                 "border-radius": "10px",
+                    #                 "height": "38px",
+                    #                 "padding": "0 18px",
+                    #             },
+                    #         )
+
+            # 우측 패널
+            with solara.Div(classes=["right-sidebar-area"], style={
+                "grid-column": "3",
+                "grid-row": "1 / 3",
+                "min-height": "0",
+                "min-width": "0",
+            }):
+                with solara.Div(style={
+                    "width": "100%",
+                    "height": "100%",
+                    "display": "flex",
+                    "flex-direction": "column",
+                    "gap": "5px",
+                    "min-height": "0",
+                }):
+                    # 우측 상단 임무 요약
+                    with solara.Div(classes=["right-top-panel"], style={
+                        "flex": "1",
+                        "min-height": "0",
+                        "background": "rgba(15, 23, 42, 0.55)",
+                        "border": "1px solid rgba(148, 163, 184, 0.12)",
+                        "border-radius": "12px",
+                        "padding": "8px",
+                        "box-sizing": "border-box",
+                        "display": "flex",
+                        "flex-direction": "column",
+                        "position": "relative",
+                    }):
+                        solara.Text(
+                            "임무 요약",
+                            classes=["card-label"],
+                            style={
+                                "font-size": "15px",
+                                "margin-bottom": "5px",
+                                "margin-left": "5px",
+                            },
+                        )
+
+                        def kpi_row(label: str, value_text: str, unit_text: str, is_last: bool = False):
+                            with solara.Div(style={
+                                "display": "flex",
+                                "align-items": "baseline",
+                                "justify-content": "space-between",
+                                "padding": "0 0 8px 0",
+                                "margin-bottom": "7px" if not is_last else "0px",
+                                "border-bottom": "none" if is_last else "1px solid rgba(71, 85, 105, 0.25)",
+                            }):
+                                solara.Text(label, style={
+                                    "font-size": "16px",
+                                    "font-weight": "400",
+                                    "color": "#abb1b9",
+                                })
+
+                                with solara.Div(style={
+                                    "display": "flex",
+                                    "align-items": "baseline",
+                                    "gap": "2px",
+                                }):
+                                    solara.Text(value_text, style={
+                                        "font-size": "20px",
+                                        "font-weight": "700",
+                                        "color": "#e5e7eb",
+                                        "text-align": "right",
+                                    })
+                                    solara.Text(unit_text, style={
+                                        "font-size": "18px",
+                                        "font-weight": "600",
+                                        "color": "#475569",
+                                    })
+
+                        with solara.Div(style={
+                            "flex": "1",
+                            "min-height": "0",
+                            "background": "rgba(30, 41, 59, 0.38)",
+                            "border": "1px solid rgba(71, 85, 105, 0.28)",
+                            "border-radius": "9px",
+                            "padding": "10px 12px",
+                            "box-sizing": "border-box",
+                            "display": "flex",
+                            "flex-direction": "column",
+                            "justify-content": "flex-start",
+                        }):
+                            kpi_row("임무 성공률", f"{kpi_data['mission_success']:.1f}", "%")
+                            kpi_row("최저 성공률", f"{kpi_data['worst_success']:.1f}", "%")
+                            kpi_row("도착 UGV 수", f"{kpi_data['arrived_ugv']:.1f}", "대")
+                            kpi_row("SOS 요청 건수", f"{kpi_data['sos_count']:.1f}", "건")
+                            kpi_row("건당 대기열", f"{kpi_data['per_sos_queue']:.1f}", "분")
+                            kpi_row("통제관 가동률", f"{kpi_data['controller_util']:.1f}", "%", is_last=True)
+
+                        UserAssetPopupOverlay(current_user, my_unit_label)
+                        if False:
+                            with solara.Div(classes=["asset-popup-overlay-right"]):
+                                with solara.Div(classes=["asset-popup-panel-right"]):
+                                    with solara.Div(classes=["asset-popup-header"]):
+                                        solara.Text("기본자산", classes=["asset-popup-title"])
+                                        solara.Button(
+                                            "✕",
+                                            on_click=lambda: set_show_asset_popup(False),
+                                            classes=["asset-popup-close-btn"],
+                                        )
+
+                                    with solara.Div(classes=["asset-popup-body"]):
+                                        with solara.Div(classes=["asset-tab-col"]):
+                                            for tab_name, label in [
+                                                ("부대", "부대"),
+                                                (f"{my_unit_label} 기본자산", my_unit_label),
+                                            ]:
+                                                solara.Button(
+                                                    label,
+                                                    on_click=lambda t=tab_name: set_asset_tab(t),
+                                                    classes=[
+                                                        "asset-tab-btn2",
+                                                        "asset-tab-btn2-active" if asset_tab == tab_name else "asset-tab-btn2-default",
+                                                    ],
+                                                )
+
+                                        with solara.Div(classes=["asset-tab-content"]):
+                                            if asset_tab == "부대":
+                                                BaseAssetEditor()
+                                            else:
+                                                UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
+
+                    # 우측 하단 LTWR
+                    with solara.Div(classes=["right-bottom-panel"], style={
+                        "flex": "1",
+                        "min-height": "0",
+                        "display": "flex",
+                        "flex-direction": "column",
+                        "background": "rgba(15, 23, 42, 0.55)",
+                        "border": "1px solid rgba(148, 163, 184, 0.12)",
+                        "border-radius": "12px",
+                        "padding": "8px",
+                        "box-sizing": "border-box",
+                        "overflow": "hidden",
+                    }):
+                        solara.Text(
+                            "지상 작전 기상 위험도 - LTWR",
+                            classes=["card-label"],
+                            style={"font-size": "15px", "margin-bottom": "5px", "margin-left": "5px"},
+                        )
+
+                        with solara.Div(
+                            classes=["ltwr-scroll-area"],
+                            style={
+                                "flex": "1",
+                                "min-height": "0",
+                                "display": "flex",
+                                "flex-direction": "column",
+                                "gap": "12px",
+                                "overflow-y": "auto",
+                                "padding-right": "4px",
+                            },
+                        ):
+                            MapCard(map_label_1, "map_01_Tactical_Weighted_Cost_1h.html", None)
+                            MapCard(map_label_2, "map_01_Tactical_Weighted_Cost_2h.html", None)
+                            MapCard(map_label_3, "map_01_Tactical_Weighted_Cost_3h.html", None)
+
+        # 통제관용 센터 버튼으로 옮겼으니 여기 고정 버튼은 제거
+        # with solara.Div(...): 임무 확인 버튼 부분은 삭제됨
 
 
 
 
+@solara.component
+def MarkerMessenger(markers_json: str):
+    def effect():
+        solara.HTML(
+            tag="script",
+            unsafe_innerHTML=f"""
+            (function() {{
+                const send = () => {{
+                    const frame = document.getElementById('commander-map-frame');
+                    if (!frame || !frame.contentWindow) return;
 
+                    frame.contentWindow.postMessage({{
+                        type: 'setMarkers',
+                        markers: {markers_json}
+                    }}, '*');
+                }};
+
+                setTimeout(send, 150);
+                setTimeout(send, 400);
+            }})();
+            """
+        )
+    solara.use_effect(effect, [markers_json])
 
 # ──────────────────────────────────────────────────────────────
 # [팀원 코드] 지휘관 입력 페이지 (좌표 + 정찰시간 입력)
@@ -2903,335 +3261,53 @@ def UserPage():
 # ──────────────────────────────────────────────────────────────
 @solara.component
 def CommanderInputPage():
-    marker_client_id, _ = solara.use_state(uuid.uuid4().hex)
-    mission_inputs = solara.use_reactive({
-        "departure": {"lat": "", "lng": ""},
-        "targets": [
-            {"lat": "", "lng": "", "patrol_time": "00:30:00"},
-            {"lat": "", "lng": "", "patrol_time": "00:30:00"},
-            {"lat": "", "lng": "", "patrol_time": "00:30:00"},
-        ],
-    })
-    last_click_seq = solara.use_reactive(0)
-    marker_push_seq = solara.use_reactive(0)
+    form = commander_input_state.value
 
-    def format_coord(value):
-        if value is None:
-            return ""
-        try:
-            return f"{float(value):.6f}"
-        except (TypeError, ValueError):
-            return str(value).strip()
+    unit1_lat = form["user1"]["lat"]
+    unit1_lng = form["user1"]["lng"]
+    unit1_recon = form["user1"]["recon"]
 
-    def parse_hms(value):
-        try:
-            hour, minute, second = value.strip().split(":")
-            return int(hour) * 3600 + int(minute) * 60 + int(second)
-        except Exception:
-            return 1800
+    unit2_lat = form["user2"]["lat"]
+    unit2_lng = form["user2"]["lng"]
+    unit2_recon = form["user2"]["recon"]
 
-    def snapshot_state(state):
-        return {
-            "departure": dict(state["departure"]),
-            "targets": [dict(target) for target in state["targets"]],
-        }
-
-    def build_markers_payload(state, seq):
-        markers = []
-        departure = state["departure"]
-        try:
-            if departure["lat"].strip() and departure["lng"].strip():
-                markers.append({
-                    "id": "departure",
-                    "unit": 0,
-                    "lat": float(departure["lat"]),
-                    "lng": float(departure["lng"]),
-                    "kind": "departure",
-                    "departure": True,
-                })
-        except (KeyError, TypeError, ValueError):
-            pass
-
-        for index, target in enumerate(state["targets"], start=1):
-            try:
-                if target["lat"].strip() and target["lng"].strip():
-                    markers.append({
-                        "id": f"target-{index}",
-                        "unit": index,
-                        "lat": float(target["lat"]),
-                        "lng": float(target["lng"]),
-                        "kind": "arrival",
-                        "departure": False,
-                    })
-            except (KeyError, TypeError, ValueError):
-                continue
-        return {"seq": seq, "client_id": marker_client_id, "markers": markers}
-
-    def push_markers(state, seq):
-        import requests as _req
-
-        try:
-            _req.post(
-                f"{BACKEND_HTTP_BASE}/api/map/input/markers",
-                json=build_markers_payload(state, seq),
-                timeout=2,
-            )
-        except Exception:
-            pass
-
-    def queue_marker_push(state):
-        marker_push_seq.value += 1
-        seq = marker_push_seq.value
-        state_snapshot = snapshot_state(state)
-        threading.Thread(target=push_markers, args=(state_snapshot, seq), daemon=True).start()
-
-    def apply_inputs(next_state):
-        mission_inputs.set(next_state)
-
-    def update_departure(field, value):
-        current = mission_inputs.value
-        next_state = {
+    unit3_lat = form["user3"]["lat"]
+    unit3_lng = form["user3"]["lng"]
+    unit3_recon = form["user3"]["recon"]
+    
+    def set_field(user_key, field, value):
+        current = commander_input_state.value
+        commander_input_state.set({
             **current,
-            "departure": {**current["departure"], field: value},
-            "targets": [dict(target) for target in current["targets"]],
-        }
-        apply_inputs(next_state)
-
-    def update_target(index, field, value):
-        current = mission_inputs.value
-        targets = [dict(target) for target in current["targets"]]
-        targets[index] = {**targets[index], field: value}
-        apply_inputs({
-            **current,
-            "departure": dict(current["departure"]),
-            "targets": targets,
+            user_key: {
+                **current[user_key],
+                field: value,
+            }
         })
 
-    def persist_local_state(state):
+    def handle_submit():
+        form = commander_input_state.value
+
         destination_data.set({
-            f"user{index}": {"lat": target["lat"], "lng": target["lng"]}
-            for index, target in enumerate(state["targets"], start=1)
+            "user1": {"lat": form["user1"]["lat"], "lng": form["user1"]["lng"]},
+            "user2": {"lat": form["user2"]["lat"], "lng": form["user2"]["lng"]},
+            "user3": {"lat": form["user3"]["lat"], "lng": form["user3"]["lng"]},
         })
+
         mission_settings.set({
             **mission_settings.value,
             "recon_times": {
-                f"user{index}": target["patrol_time"]
-                for index, target in enumerate(state["targets"], start=1)
+                "user1": form["user1"]["recon"],
+                "user2": form["user2"]["recon"],
+                "user3": form["user3"]["recon"],
             },
         })
+        sync_unit_targets_from_mode_destinations()
+        if auth_token.value:
+            threading.Thread(target=post_operator_mission_config, daemon=True).start()
 
-        updated_assets = dict(asset_data.value)
-        updated_assets["base"] = {
-            **updated_assets["base"],
-            "departure_lat": state["departure"]["lat"],
-            "departure_lon": state["departure"]["lng"],
-        }
-        for index, target in enumerate(state["targets"], start=1):
-            user_key = f"user{index}"
-            updated_assets[user_key] = {
-                **updated_assets[user_key],
-                "target_lat": target["lat"],
-                "target_lon": target["lng"],
-            }
-        asset_data.set(updated_assets)
-        mission_note.set("\uc9c0\ud718\uad00 \uc785\ub825 \uc644\ub8cc")
-        return updated_assets
-
-    def load_initial_inputs():
-        import requests as _req
-
-        try:
-            _req.post(
-                f"{BACKEND_HTTP_BASE}/api/map/input/reset",
-                timeout=2,
-            )
-        except Exception:
-            pass
-
-        base = asset_data.value.get("base", {})
-        recon_times = mission_settings.value.get("recon_times", {})
-        initial_state = {
-            "departure": {
-                "lat": str(base.get("departure_lat", "") or ""),
-                "lng": str(base.get("departure_lon", "") or ""),
-            },
-            "targets": [
-                {
-                    "lat": str(asset_data.value.get(f"user{index}", {}).get("target_lat", "") or ""),
-                    "lng": str(asset_data.value.get(f"user{index}", {}).get("target_lon", "") or ""),
-                    "patrol_time": str(recon_times.get(f"user{index}", "00:30:00") or "00:30:00"),
-                }
-                for index in range(1, 4)
-            ],
-        }
-        last_click_seq.value = 0
-        apply_inputs(initial_state)
-
-    solara.use_effect(load_initial_inputs, [])
-
-    def sync_markers_effect():
-        queue_marker_push(mission_inputs.value)
-
-    solara.use_effect(
-        sync_markers_effect,
-        [json.dumps(mission_inputs.value, sort_keys=True)],
-    )
-
-    @solara.lab.use_task
-    async def poll_map_click():
-        import requests as _req
-
-        def _fetch():
-            try:
-                response = _req.get(
-                    f"{BACKEND_HTTP_BASE}/api/map/input/pending-click",
-                    timeout=2,
-                )
-                return response.json()
-            except Exception:
-                return None
-
-        while True:
-            data = await asyncio.to_thread(_fetch)
-            if data and data.get("seq", 0) > last_click_seq.value:
-                last_click_seq.value = data["seq"]
-                lat = data.get("lat")
-                lng = data.get("lng")
-                unit = data.get("unit")
-                kind = data.get("kind")
-                is_departure = bool(data.get("departure")) or kind == "departure" or unit == 0
-                if lat is not None and lng is not None:
-                    current = mission_inputs.value
-                    next_state = {
-                        "departure": dict(current["departure"]),
-                        "targets": [dict(target) for target in current["targets"]],
-                    }
-                    if is_departure:
-                        next_state["departure"] = {
-                            "lat": format_coord(lat),
-                            "lng": format_coord(lng),
-                        }
-                    elif unit in (1, 2, 3):
-                        next_state["targets"][unit - 1] = {
-                            **next_state["targets"][unit - 1],
-                            "lat": format_coord(lat),
-                            "lng": format_coord(lng),
-                        }
-                    apply_inputs(next_state)
-            await asyncio.sleep(0.1)
-
-    def handle_submit():
-        state_snapshot = {
-            "departure": dict(mission_inputs.value["departure"]),
-            "targets": [dict(target) for target in mission_inputs.value["targets"]],
-        }
-        updated_assets = persist_local_state(state_snapshot)
-
-        def _do_api():
-            import requests as _req
-
-            headers = {}
-            if auth_token.value:
-                headers["Authorization"] = f"Bearer {auth_token.value}"
-
-            try:
-                departure_lat = float(state_snapshot["departure"]["lat"]) if state_snapshot["departure"]["lat"].strip() else 0.0
-                departure_lng = float(state_snapshot["departure"]["lng"]) if state_snapshot["departure"]["lng"].strip() else 0.0
-                total_ugv = max(1, min(4, int(updated_assets["base"].get("total_ugv", 4))))
-                mission_id = active_mission_id.value
-
-                if not mission_id:
-                    create_response = _req.post(
-                        f"{BACKEND_HTTP_BASE}/api/missions",
-                        json={
-                            "name": f"{logged_in_user.value or 'CMD'} \uc784\ubb34",
-                            "echelon_no": 1,
-                            "total_ugv": total_ugv,
-                            "max_ugv_count": total_ugv,
-                            "mission_duration_min": 120,
-                            "departure_lat": departure_lat,
-                            "departure_lon": departure_lng,
-                        },
-                        headers=headers,
-                        timeout=5,
-                    )
-                    if create_response.status_code != 201:
-                        return
-                    mission_id = create_response.json().get("id")
-                    if not mission_id:
-                        return
-                    active_mission_id.set(mission_id)
-
-                patch_response = _req.patch(
-                    f"{BACKEND_HTTP_BASE}/api/missions/{mission_id}",
-                    json={
-                        "name": f"{logged_in_user.value or 'CMD'} \uc784\ubb34",
-                        "echelon_no": 1,
-                        "total_ugv": total_ugv,
-                        "max_ugv_count": total_ugv,
-                        "mission_duration_min": 120,
-                        "departure_lat": departure_lat,
-                        "departure_lon": departure_lng,
-                    },
-                    headers=headers,
-                    timeout=5,
-                )
-                if patch_response.status_code != 200:
-                    return
-
-                targets_payload = []
-                for index, target in enumerate(state_snapshot["targets"], start=1):
-                    if not target["lat"].strip() or not target["lng"].strip():
-                        continue
-                    try:
-                        targets_payload.append({
-                            "seq": index,
-                            "lat": float(target["lat"]),
-                            "lon": float(target["lng"]),
-                            "patrol_duration_sec": parse_hms(target["patrol_time"]),
-                        })
-                    except ValueError:
-                        continue
-
-                targets_response = _req.post(
-                    f"{BACKEND_HTTP_BASE}/api/missions/{mission_id}/targets",
-                    json=targets_payload,
-                    headers=headers,
-                    timeout=5,
-                )
-                if targets_response.status_code not in (200, 201):
-                    return
-
-                run_response = _req.post(
-                    f"{BACKEND_HTTP_BASE}/api/missions/{mission_id}/runs",
-                    headers=headers,
-                    timeout=5,
-                )
-                if run_response.status_code != 201:
-                    return
-                run_id = run_response.json().get("id")
-                if not run_id:
-                    return
-                active_run_id.set(run_id)
-
-                start_response = _req.post(
-                    f"{BACKEND_HTTP_BASE}/api/runs/{run_id}/start",
-                    headers=headers,
-                    timeout=5,
-                )
-                if start_response.status_code not in (200, 201):
-                    return
-            except Exception:
-                return
-
-        threading.Thread(target=_do_api, daemon=True).start()
-
-        try:
-            post_operator_mission_config()
-        except Exception:
-            pass
-
-        workflow_step.set(1)
+        mission_note.set("지휘관 입력 완료")
+        workflow_step.set(1)  # -> LoadingPage
 
     solara.Style("""
         html, body, #app, .v-application, .v-application__wrap,
@@ -3241,23 +3317,23 @@ def CommanderInputPage():
             overflow: hidden !important; background: #0b1426 !important;
         }
 
-        .commander-input-root { width: 100vw; height: 100dvh; overflow: hidden; background: #0b1426; box-sizing: border-box; padding: 12px; }
+        .commander-input-root { width: 100vw; height: 100dvh; overflow: hidden; background: #0b1426; box-sizing: border-box; padding: 16px; }
 
         .commander-input-shell {
             width: 100%; height: 100%;
-            display: grid; grid-template-columns: minmax(0, 1.72fr) minmax(420px, 0.98fr);
-            gap: 12px; min-height: 0;
+            display: grid; grid-template-columns: 1.95fr 1.05fr;
+            gap: 16px; min-height: 0;
         }
 
         .commander-map-panel {
             background: linear-gradient(180deg, rgba(9,20,42,0.96), rgba(8,18,38,0.98));
-            border: 1px solid rgba(45,58,84,0.7); border-radius: 18px; padding: 16px;
+            border: 1px solid rgba(45,58,84,0.7); border-radius: 18px; padding: 20px;
             display: flex; flex-direction: column; min-height: 0; height: 100%;
             box-sizing: border-box; overflow: hidden;
         }
 
-        .commander-map-header { color: white; font-size: 22px; font-weight: 800; margin-bottom: 6px; }
-        .commander-map-sub    { color: #94a3b8; font-size: 13px; margin-bottom: 12px; line-height: 1.4; }
+        .commander-map-header { color: white; font-size: 24px; font-weight: 800; margin-bottom: 8px; }
+        .commander-map-sub    { color: #94a3b8; font-size: 14px; margin-bottom: 16px; line-height: 1.45; }
 
         .commander-map-box {
             flex: 1; min-height: 0; border-radius: 16px;
@@ -3268,115 +3344,236 @@ def CommanderInputPage():
             width: 100%; height: 100%; border: none; display: block;
         }
 
+        .commander-map-title   { font-size: 22px; font-weight: 700; color: white; margin-bottom: 4px; }
+        .commander-map-caption { font-size: 15px; color: #cbd5e1; line-height: 1.5; }
+
         .commander-side-panel {
-            background: rgba(22,34,56,0.88); border: 1px solid rgba(45,58,84,0.7);
-            border-radius: 18px; padding: 12px;
-            display: flex; flex-direction: column; gap: 8px;
-            min-height: 0; height: 100%; box-sizing: border-box;
-            overflow-x: hidden; overflow-y: auto;
-            scrollbar-width: thin;
+            background: rgba(11, 18, 32, 0.96);
+            border: 1px solid rgba(45, 58, 84, 0.85);
+            border-radius: 18px;
+            padding: 18px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-height: 0;
+            height: 100%;
+            box-sizing: border-box;
+            overflow: hidden;
         }
 
         .commander-section-card {
-            background: rgba(15,23,42,0.9); border-radius: 14px; padding: 10px 12px;
-            border: 1px solid rgba(51,65,85,0.75);
-        }
-        .commander-section-title { color: white; font-size: 16px; font-weight: 800; margin-bottom: 8px; }
-        .commander-input-group { display: flex; flex-direction: column; gap: 6px; }
-        .commander-field-row { display: grid; grid-template-columns: 68px 1fr; align-items: center; gap: 8px; }
-        .commander-field-label-inline { color: #dbeafe; font-size: 12px; font-weight: 700; }
-
-        .commander-submit-wrap {
-            margin-top: auto;
-            position: sticky;
-            bottom: 0;
-            padding-top: 8px;
-            padding-bottom: 2px;
-            background: linear-gradient(180deg, rgba(22,34,56,0), rgba(22,34,56,0.96) 28%);
+            background: rgba(11,20,38,0.92); border: 1px solid rgba(45,58,84,0.65);
+            border-radius: 14px; padding: 14px; flex: 1; min-height: 0;
+            display: flex; flex-direction: column; justify-content: center;
+            box-sizing: border-box; overflow: hidden;
         }
 
-        .commander-side-panel .v-input { margin: 0 !important; padding: 0 !important; }
-        .commander-side-panel .v-messages,
-        .commander-side-panel .v-label { display: none !important; }
+        .commander-section-title { color: white; font-size: 16px; font-weight: 700; margin-bottom: 10px; flex-shrink: 0; }
+
+        .commander-input-group { display: flex; flex-direction: column; gap: 10px; flex: 1; justify-content: center; min-height: 0; }
+
+        .commander-field-row { display: grid; grid-template-columns: 72px 1fr; align-items: center; gap: 10px; min-height: 0; }
+
+        .commander-field-label-inline { color: #cbd5e1; font-size: 14px; font-weight: 600; text-align: left; white-space: nowrap; }
+
+        .commander-submit-wrap { margin-top: 0; padding-top: 0; flex-shrink: 0; }
+
+        .commander-side-panel .v-input              { margin-top: 0 !important; padding-top: 0 !important; }
+        .commander-side-panel .v-input__control     { min-height: auto !important; }
+        .commander-side-panel .v-text-field         { margin-top: 0 !important; }
+        .commander-side-panel .v-label              { display: none !important; }
         .commander-side-panel .v-input__slot,
         .commander-side-panel .v-text-field > .v-input__control > .v-input__slot {
-            background: rgba(30,41,59,0.9) !important; border-radius: 10px !important;
-            box-shadow: none !important; min-height: 40px !important; padding: 0 10px !important;
+            background: rgba(23, 33, 52, 0.95) !important; border-radius: 10px !important;
+            box-shadow: none !important; min-height: 46px !important; padding: 0 12px !important;
         }
-        .commander-side-panel input { color: white !important; font-size: 14px !important; }
-
-        @media (max-width: 1400px) {
-            .commander-input-shell {
-                grid-template-columns: minmax(0, 1.6fr) minmax(380px, 1fr);
-            }
-        }
+        .commander-side-panel input { color: white !important; font-size: 15px !important; }
     """)
+    
+    marker_payload = []
+    
+    # ① 항상 표시할 출발지 마커 (고정)
+    marker_payload.append({
+        "id": "start",
+        "lat": "54.48",
+        "lng": "18.32",
+        "label": "출발지",
+        "color": "#e67e22",  # 주황색 등 눈에 띄는 색
+    })
+    
+    # ② 나머지 도착지 마커 (사용자 입력 기반)
+    marker_state = commander_marker_state.value
+
+    for user_key, label, color in [
+        ("user1", "도착지1", "#3b82f6"),
+        ("user2", "도착지2", "#52c41a"),
+        ("user3", "도착지3", "#a855f7"),
+    ]:
+        marker = marker_state.get(user_key)
+        if marker and str(marker.get("lat", "")).strip() and str(marker.get("lng", "")).strip():
+            marker_payload.append({
+                "id": user_key,
+                "lat": str(marker["lat"]).strip(),
+                "lng": str(marker["lng"]).strip(),
+                "label": label,
+                "color": color,
+            })
+
+    #markers_json = json.dumps(marker_payload, ensure_ascii=False)
+    
+    def apply_marker(user_key):
+        form = commander_input_state.value
+        lat = str(form[user_key]["lat"]).strip()
+        lng = str(form[user_key]["lng"]).strip()
+
+        if not lat or not lng:
+            return
+
+        current = commander_marker_state.value
+        commander_marker_state.set({
+            **current,
+            user_key: {
+                "lat": lat,
+                "lng": lng,
+            }
+        })
+    
+    # def send_markers_effect():
+    #     solara.HTML(
+    #         tag="script",
+    #         unsafe_innerHTML=f"""
+    #         (function() {{
+    #             const send = () => {{
+    #                 const frame = document.getElementById('commander-map-frame');
+    #                 if (!frame || !frame.contentWindow) return;
+
+    #                 frame.contentWindow.postMessage({{
+    #                     type: 'setMarkers',
+    #                     markers: {markers_json}
+    #                 }}, '*');
+    #             }};
+
+    #             setTimeout(send, 150);
+    #             setTimeout(send, 400);
+    #         }})();
+    #         """
+    #     )
+
+    # solara.use_effect(send_markers_effect, [markers_json])
 
     with solara.Div(classes=["commander-input-root"]):
         with solara.Div(classes=["commander-input-shell"]):
+            # 좌측: 지도 영역 (Leaflet 지형 + 버퍼 오버레이)
             with solara.Div(classes=["commander-map-panel"]):
                 solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-map-header'>작전 지역</div>")
                 solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-map-sub'>지형 지도에서 제대별 도착지를 확인하세요.</div>")
                 with solara.Div(classes=["commander-map-box"]):
+                    _map_html = build_base_map_html(BACKEND_HTTP_BASE, markers=marker_payload)
                     solara.HTML(
                         tag="iframe",
                         attributes={
-                            "src": f"{BACKEND_HTTP_BASE}/api/map/input/html",
+                            "id": "commander-map-frame",
+                            "srcdoc": _map_html,
                             "style": "width:100%; height:100%; border:none; display:block;",
                         },
                     )
+                    # solara.HTML(
+                    #     tag="script",
+                    #     unsafe_innerHTML=f"""
+                    #     setTimeout(function() {{
+                    #         const frame = document.getElementById('commander-map-frame');
+                    #         if (!frame || !frame.contentWindow) return;
 
+                    #         frame.contentWindow.postMessage({{
+                    #             type: 'setMarkers',
+                    #             markers: {markers_json}
+                    #         }}, '*');
+                    #     }}, 100);
+                    #     """,
+                    # )
+
+            # 우측: 입력 패널 (1~3제대 좌표 + 정찰시간)
             with solara.Div(classes=["commander-side-panel"]):
-                with solara.Div(classes=["commander-section-card"]):
-                    solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-section-title'>\ucd9c\ubc1c\uc9c0 \uc785\ub825</div>")
-                    with solara.Div(classes=["commander-input-group"]):
-                        with solara.Div(classes=["commander-field-row"]):
-                            solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc704\ub3c4</div>")
-                            solara.InputText("", value=Ref(mission_inputs.fields["departure"]["lat"]), continuous_update=True)
-                        with solara.Div(classes=["commander-field-row"]):
-                            solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uacbd\ub3c4</div>")
-                            solara.InputText("", value=Ref(mission_inputs.fields["departure"]["lng"]), continuous_update=True)
-
-                for index, title in enumerate([
-                    "1\uc81c\ub300 \ub3c4\ucc29\uc9c0 \uc785\ub825",
-                    "2\uc81c\ub300 \ub3c4\ucc29\uc9c0 \uc785\ub825",
-                    "3\uc81c\ub300 \ub3c4\ucc29\uc9c0 \uc785\ub825",
-                ]):
+                for (user_key, title, lat_v, lng_v) in [
+                    ("user1", "도착지1 입력", unit1_lat, unit1_lng),
+                    ("user2", "도착지2 입력", unit2_lat, unit2_lng),
+                    ("user3", "도착지3 입력", unit3_lat, unit3_lng),
+                ]:
                     with solara.Div(classes=["commander-section-card"]):
                         solara.HTML(tag="div", unsafe_innerHTML=f"<div class='commander-section-title'>{title}</div>")
                         with solara.Div(classes=["commander-input-group"]):
                             with solara.Div(classes=["commander-field-row"]):
-                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc704\ub3c4</div>")
-                                solara.InputText("", value=Ref(mission_inputs.fields["targets"][index]["lat"]), continuous_update=True)
+                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>위도</div>")
+                                solara.InputText(
+                                    "",
+                                    value=lat_v,
+                                    on_value=lambda v, user_key=user_key: set_field(user_key, "lat", v),
+                                    continuous_update=False,
+                                )
                             with solara.Div(classes=["commander-field-row"]):
-                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uacbd\ub3c4</div>")
-                                solara.InputText("", value=Ref(mission_inputs.fields["targets"][index]["lng"]), continuous_update=True)
-                            with solara.Div(classes=["commander-field-row"]):
-                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>\uc815\ucc30\uc2dc\uac04</div>")
-                                solara.InputText("", value=Ref(mission_inputs.fields["targets"][index]["patrol_time"]))
+                                solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>경도</div>")
+                                solara.InputText(
+                                    "",
+                                    value=lng_v,
+                                    on_value=lambda v, user_key=user_key: set_field(user_key, "lng", v),
+                                    continuous_update=False,
+                                )
+                            solara.Button(
+                                f"{title.replace(' 입력', '')} 표시",
+                                on_click=lambda user_key=user_key: apply_marker(user_key),
+                                style={
+                                    "background-color": "rgba(30, 41, 59, 0.78)",
+                                    "color": "white",
+                                    "height": "32px",
+                                    "width": "150px",
+                                    "border-radius": "8px",
+                                    "font-weight": "700",
+                                    "font-size": "14px",
+                                    "margin-top": "8px",
+                                    "margin-left": "auto",
+                                    "margin-right": "auto",
+                                    "display": "block",
+                                },
+                            )
 
                 with solara.Div(classes=["commander-submit-wrap"]):
                     solara.Button(
-                        "\uc2dc\ubbac\ub808\uc774\uc158 \uc2e4\ud589",
+                        "시뮬레이션 실행",
                         on_click=handle_submit,
                         style={
                             "background-color": "#e67e22", "color": "white",
                             "height": "46px", "width": "100%",
-                            "border-radius": "10px", "font-weight": "bold",
+                            "border-radius": "10px", "font-weight": "bold", "font-size": "16px",
                         },
                     )
 
 
+# ──────────────────────────────────────────────────────────────
+# [팀원 코드] 로딩 페이지 (세로 막대 애니메이션)
+# workflow_step=1 → 버튼 클릭 시 commander_data_ready=True, workflow_step=2
+# ──────────────────────────────────────────────────────────────
 @solara.component
 def LoadingPage():
     def go_to_commander_page():
+        if workflow_step.value != 1:
+            return
+
+        rid = active_run_id.value
         simulation_done.set(True)
         commander_data_ready.set(True)
         workflow_step.set(2)
         # active_run_id가 설정되어 있으면 WS 연결 시작
-        rid = active_run_id.value
         if rid:
             ws_client.start_live_updates(rid)
+            
+    @solara.lab.use_task(dependencies=[workflow_step.value, active_run_id.value])
+    async def auto_redirect():
+        if workflow_step.value != 1:
+            return
+        await asyncio.sleep(2)
+        if workflow_step.value != 1:
+            return
+        go_to_commander_page()
 
     solara.Style("""
         html, body, #app, .v-application, .v-application__wrap,
@@ -3426,22 +3623,21 @@ def LoadingPage():
                 tag="div",
                 unsafe_innerHTML=(
                     "<div class='loading-caption'>"
-                    "지휘관이 입력한 목적지 데이터로 시뮬레이션을 수행하고 있습니다.<br>"
-                    "현재는 백엔드 미연동 상태이므로, 버튼으로 다음 단계로 이동합니다."
+                    "지휘관이 입력한 목적지 데이터로 시뮬레이션을 수행하고 있습니다."
                     "</div>"
                 ),
             )
 
-            with solara.Div(classes=["loading-button-wrap"]):
-                solara.Button(
-                    "지휘관 메인 대시보드로 이동",
-                    on_click=go_to_commander_page,
-                    style={
-                        "background-color": "#f97316", "color": "white",
-                        "height": "46px", "width": "260px",
-                        "border-radius": "999px", "font-weight": "bold",
-                    },
-                )
+            # with solara.Div(classes=["loading-button-wrap"]):
+            #     solara.Button(
+            #         "지휘관 메인 대시보드로 이동",
+            #         on_click=go_to_commander_page,
+            #         style={
+            #             "background-color": "#f97316", "color": "white",
+            #             "height": "46px", "width": "260px",
+            #             "border-radius": "999px", "font-weight": "bold",
+            #         },
+            #     )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -3465,35 +3661,112 @@ def UserMissionPage():
             base = data.get("base_assets", {})
             unit = data.get("unit_assets", {})
             mission = data.get("mission", {})
+            mission_mode_value = _first_nonempty(
+                mission.get("mode"),
+                _resolve_mission_mode(),
+                default="균형",
+            )
+            operating_count_value = mission.get("operating_ugv_count")
+            if operating_count_value in (None, "", 0, "0"):
+                operating_count_value = mission.get("available_ugv")
+            if operating_count_value in (None, "", 0, "0"):
+                operating_count_value = _resolve_operating_ugv_count(current_user)
+            target_lat_value = _first_nonempty(
+                unit.get("target_lat"),
+                _resolve_target_coordinate(current_user, "lat"),
+            )
+            target_lon_value = _first_nonempty(
+                unit.get("target_lon"),
+                _resolve_target_coordinate(current_user, "lon"),
+            )
+            depart_time_value = _first_nonempty(
+                mission.get("depart_time"),
+                _resolve_departure_time(current_user),
+                default="-",
+            )
+            
+            # 현재 임무 모드 결정
+            mission_mode_value = mission.get("mode", "") or selected_mission_mode.value or active_btn.value or "균형"
+            
+            # 그 모드에서 현재 유저의 운용 UGV 수 결정
+            operating_count_value = mission.get(
+                "operating_ugv_count",
+                mission.get(
+                    "available_ugv",
+                    MISSION_UGV_PLAN_BY_MODE.get(mission_mode_value, {}).get(current_user, 0),
+                ),
+            )
+            
             # 백엔드 응답을 mission_delivery_data 구조로 매핑
+            mission_mode_value = _first_nonempty(
+                mission.get("mode"),
+                _resolve_mission_mode(),
+                default="균형",
+            )
+            operating_count_value = mission.get("operating_ugv_count")
+            if operating_count_value in (None, "", 0, "0"):
+                operating_count_value = mission.get("available_ugv")
+            if operating_count_value in (None, "", 0, "0"):
+                operating_count_value = _resolve_operating_ugv_count(current_user)
             updated = dict(mission_delivery_data.value)
             updated["delivered"] = True
             updated["base_summary"] = {
                 "total_units":       base.get("total_units", 3),
                 "total_controllers": base.get("total_controllers", 3),
                 "total_ugv":         base.get("total_ugv", 13),
+                "total_recon_ugv":   base.get("total_ugv", 13),
                 "total_lost_ugv":    base.get("lost_ugv", 0),
             }
             units = dict(updated.get("units", {}))
             units[current_user] = {
                 "controllers":   unit.get("controllers", 1),
                 "total_ugv":     unit.get("total_ugv", 5),
+                "total_recon_ugv": unit.get("total_ugv", 5),
                 "lost_ugv":      unit.get("lost_ugv", 0),
                 "available_ugv": unit.get("available_ugv", 5),
-                "target_lat":    unit.get("target_lat", ""),
-                "target_lon":    unit.get("target_lon", ""),
+                "operating_ugv_count": operating_count_value,
+                "target_lat":    target_lat_value,
+                "target_lon":    target_lon_value,
             }
             updated["units"] = units
             mission_info = dict(updated.get("mission_info", {}))
             mission_info[current_user] = {
-                "mission_mode":       mission.get("mode", "균형"),
-                "operating_ugv_count": mission.get("available_ugv", 0),
-                "departure_time":     mission.get("depart_time", "-"),
-                "arrival_time":       mission.get("arrive_time", "-"),
-                "recon_time":         mission.get("recon_time", "-"),
+                "mission_mode": mission_mode_value,
+                "operating_ugv_count": operating_count_value,
+                "departure_time": depart_time_value,
+                "arrival_time": mission.get("arrive_time") or "-",
+                #"recon_time":         mission.get("recon_time", "-"),
             }
             updated["mission_info"] = mission_info
             mission_delivery_data.set(updated)
+
+            updated_assets = dict(asset_data.value)
+            updated_assets["base"] = {
+                **updated_assets.get("base", {}),
+                "total_units": base.get("total_units", 3),
+                "total_controllers": base.get("total_controllers", 3),
+                "total_ugv": base.get("total_ugv", 13),
+                "lost_ugv": base.get("lost_ugv", 0),
+            }
+            updated_assets[current_user] = {
+                **updated_assets.get(current_user, {}),
+                "controllers": unit.get("controllers", 1),
+                "total_ugv": unit.get("total_ugv", 5),
+                "lost_ugv": unit.get("lost_ugv", 0),
+                "available_ugv": unit.get("available_ugv", 5),
+                "target_lat": target_lat_value,
+                "target_lon": target_lon_value,
+            }
+            asset_data.set(updated_assets)
+
+            selected_mission_mode.set(mission_mode_value)
+            updated_plan = dict(operating_ugv_plan.value)
+            updated_plan[current_user] = operating_count_value
+            operating_ugv_plan.set(updated_plan)
+
+            updated_departure_times = dict(departure_times.value)
+            updated_departure_times[current_user] = depart_time_value
+            departure_times.set(updated_departure_times)
         threading.Thread(target=_call, daemon=True).start()
 
     solara.use_effect(_fetch_briefing_on_mount, [current_user])
@@ -3504,11 +3777,72 @@ def UserMissionPage():
     unit_assets = delivered.get("units", {}).get(current_user, {})
     mission_info = delivered.get("mission_info", {}).get(current_user, {})
 
+    if not any(base_summary.get(key) for key in ("total_units", "total_controllers", "total_ugv", "total_recon_ugv", "total_lost_ugv")):
+        base_summary = {
+            "total_units": asset_data.value.get("base", {}).get("total_units", 0),
+            "total_controllers": asset_data.value.get("base", {}).get("total_controllers", 0),
+            "total_ugv": asset_data.value.get("base", {}).get("total_ugv", 0),
+            "total_recon_ugv": asset_data.value.get("base", {}).get("total_ugv", 0),
+            "total_lost_ugv": asset_data.value.get("base", {}).get("lost_ugv", 0),
+        }
+
+    state_unit_assets = asset_data.value.get(current_user, {})
+    unit_assets = {
+        "controllers": unit_assets.get("controllers")
+        if unit_assets.get("controllers") not in (None, "", 0, "0")
+        else state_unit_assets.get("controllers", 0),
+        "total_ugv": unit_assets.get("total_ugv")
+        if unit_assets.get("total_ugv") not in (None, "", 0, "0")
+        else state_unit_assets.get("total_ugv", 0),
+        "total_recon_ugv": unit_assets.get("total_recon_ugv")
+        if unit_assets.get("total_recon_ugv") not in (None, "", 0, "0")
+        else state_unit_assets.get("total_ugv", 0),
+        "lost_ugv": unit_assets.get("lost_ugv")
+        if unit_assets.get("lost_ugv") not in (None, "")
+        else state_unit_assets.get("lost_ugv", 0),
+        "available_ugv": unit_assets.get("available_ugv")
+        if unit_assets.get("available_ugv") not in (None, "", 0, "0")
+        else state_unit_assets.get("available_ugv", 0),
+        "target_lat": _first_nonempty(
+            unit_assets.get("target_lat"),
+            _resolve_target_coordinate(current_user, "lat"),
+        ),
+        "target_lon": _first_nonempty(
+            unit_assets.get("target_lon"),
+            _resolve_target_coordinate(current_user, "lon"),
+        ),
+    }
+
     # fallback: mission_settings에서도 읽기
-    recon = mission_info.get("recon_time", "") or mission_settings.value.get("recon_times", {}).get(current_user, "")
-    depart = mission_info.get("departure_time", "-")
-    arrive = mission_info.get("arrival_time", "-")
-    mode = mission_info.get("mission_mode", mission_mode.value) or mission_mode.value
+    #recon = mission_info.get("recon_time", "") or mission_settings.value.get("recon_times", {}).get(current_user, "")
+    mode = mission_info.get("mission_mode", selected_mission_mode.value) or selected_mission_mode.value or active_btn.value or "균형"
+    depart = (
+        mission_info.get("departure_time")
+        or departure_times.value.get(current_user)
+        or mission_settings.value.get("depart_times", {}).get(current_user)
+        or "-"
+    )
+    mode = _first_nonempty(mission_info.get("mission_mode"), _resolve_mission_mode(), default="균형")
+    depart = _first_nonempty(
+        mission_info.get("departure_time"),
+        _resolve_departure_time(current_user),
+        default="-",
+    )
+    arrive = (
+        mission_info.get("arrival_time")
+        or mission_settings.value.get("arrive_times", {}).get(current_user)
+        or ARRIVAL_TIMES_BY_MODE.get(mode, {}).get(current_user)
+        or "-"
+    )
+
+    operating_count = mission_info.get(
+        "operating_ugv_count",
+        operating_ugv_plan.value.get(current_user)
+        or MISSION_UGV_PLAN_BY_MODE.get(mode, {}).get(current_user)
+        or unit_assets.get("available_ugv", "-"),
+    )
+    if operating_count in (None, "", 0, "0"):
+        operating_count = _resolve_operating_ugv_count(current_user)
 
     def go_to_user_page():
         workflow_step.set(1)
@@ -3606,11 +3940,11 @@ def UserMissionPage():
 
             # 카드 1: 부대 기본자산
             with solara.Div(classes=["briefing-card"]):
-                solara.HTML(tag="div", unsafe_innerHTML="<div class='briefing-card-title'>부대 기본자산</div>")
+                solara.HTML(tag="div", unsafe_innerHTML="<div class='briefing-card-title'>부대</div>")
                 for key, val in [
                     ("총 제대 수", base_summary.get("total_units", "-")),
                     ("총 통제관 수", base_summary.get("total_controllers", "-")),
-                    ("총 정찰 UGV 수", base_summary.get("total_recon_ugv", "-")),
+                    ("총 정찰 UGV 수", base_summary.get("total_ugv", base_summary.get("total_recon_ugv", "-"))),
                     ("총 손실 UGV 수", base_summary.get("total_lost_ugv", "-")),
                 ]:
                     with solara.Div(classes=["briefing-row"]):
@@ -3622,7 +3956,7 @@ def UserMissionPage():
                 solara.HTML(tag="div", unsafe_innerHTML=f"<div class='briefing-card-title'>{my_unit_label} 자산 현황</div>")
                 for key, val in [
                     ("통제관 수", unit_assets.get("controllers", "-")),
-                    ("총 정찰 UGV 수", unit_assets.get("total_recon_ugv", "-")),
+                    ("총 정찰 UGV 수", unit_assets.get("total_ugv", unit_assets.get("total_recon_ugv", "-"))),
                     ("손실 UGV 수", unit_assets.get("lost_ugv", "-")),
                     ("운용 가능 UGV 수", unit_assets.get("available_ugv", "-")),
                     ("목표 위도", unit_assets.get("target_lat", "-") or "-"),
@@ -3637,10 +3971,10 @@ def UserMissionPage():
                 solara.HTML(tag="div", unsafe_innerHTML="<div class='briefing-card-title'>임무 정보</div>")
                 for key, val, highlight in [
                     ("임무 모드", mode, True),
-                    ("운용 UGV 수", mission_info.get("operating_ugv_count", "-"), True),
+                    ("운용 UGV 수", operating_count, True),
                     ("출발 예정 시각", depart, False),
                     ("도착 예정 시각", arrive, False),
-                    ("정찰 예정 시간", recon or "-", False),
+                    #("정찰 예정 시간", recon or "-", False),
                 ]:
                     with solara.Div(classes=["briefing-row"]):
                         solara.Text(key, classes=["briefing-key"])
@@ -3686,10 +4020,6 @@ def CommanderHomeHeader():
                 solara.Text(home_current_time.value, style={"font-size": "14px", "color": "#cbd5e1", "font-weight": "600"})
                 solara.Text(home_role_label.value,   style={"font-size": "22px", "color": "white",   "font-weight": "700"})
 
-        with solara.Column(gap="0px", style={"align-items": "center"}):
-            solara.Text("남은시간", style={"font-size": "12px", "color": "#94a3b8"})
-            solara.Text(remaining_time_text_global.value, style={"font-size": "24px", "font-weight": "700", "color": "white"})
-
         with solara.Column(gap="6px", style={"align-items": "center", "min-width": "340px"}):
             solara.Text("자산현황", style={"font-size": "12px", "color": "#94a3b8"})
             with solara.Row(gap="10px"):
@@ -3731,10 +4061,6 @@ def OperatorHomeHeader():
             with solara.Column(gap="0px"):
                 solara.Text(home_current_time.value, style={"font-size": "14px", "color": "#cbd5e1", "font-weight": "600"})
                 solara.Text(home_role_label.value,   style={"font-size": "22px", "color": "white",   "font-weight": "700"})
-
-        with solara.Column(gap="0px", style={"align-items": "center"}):
-            solara.Text("남은시간", style={"font-size": "12px", "color": "#94a3b8"})
-            solara.Text(remaining_time_text_global.value, style={"font-size": "24px", "font-weight": "700", "color": "white"})
 
         with solara.Column(gap="6px", style={"align-items": "center"}):
             solara.Text("자산현황", style={"font-size": "12px", "color": "#94a3b8"})

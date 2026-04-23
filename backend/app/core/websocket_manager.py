@@ -60,3 +60,6 @@ class WebSocketManager:
 
 # 싱글턴 인스턴스 — main.py에서 앱에 주입
 ws_manager = WebSocketManager()
+
+# 임무 설정 전용 전역 채널 (run_id 무관, 로그인 직후 구독)
+mission_ws_manager = WebSocketManager()

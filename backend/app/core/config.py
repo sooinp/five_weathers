@@ -17,24 +17,27 @@ backend/app/core/config.py
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60 (기본값)
 """
 
-import sys
 import logging
+from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
 _UNSAFE_SECRETS = {"", "1234", "change-me", "secret", "change-me-to-random-secret"}
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+_ENV_FILE = _BACKEND_DIR / ".env"
+_DEFAULT_DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5432/fiveweathersDB"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
 
     # DB
-    database_url: str
+    database_url: str = _DEFAULT_DATABASE_URL
 
     # JWT
     jwt_secret_key: str = ""

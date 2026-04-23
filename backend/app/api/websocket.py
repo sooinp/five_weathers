@@ -12,11 +12,33 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.security import _decode_token
-from app.core.websocket_manager import ws_manager
+from app.core.websocket_manager import ws_manager, mission_ws_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["websocket"])
+
+
+@router.websocket("/ws/mission")
+async def mission_websocket(ws: WebSocket, token: str | None = None):
+    """임무 설정 전용 글로벌 채널 — run_id 없이 로그인 직후 구독."""
+    try:
+        _decode_token(token)
+    except Exception:
+        logger.warning("WS mission auth failed")
+        await ws.close(code=4001)
+        return
+
+    await mission_ws_manager.connect(0, ws)
+    try:
+        while True:
+            data = await ws.receive_text()
+            if data == "ping":
+                await ws.send_text("pong")
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await mission_ws_manager.disconnect(0, ws)
 
 
 @router.websocket("/ws/runs/{run_id}")

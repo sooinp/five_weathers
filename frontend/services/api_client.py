@@ -22,11 +22,23 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from typing import Any
 
 import requests
 import solara
-from components.state import remaining_time_text_global, timer_remaining_secs, timer_running
+
+from components.state import (
+    active_btn,
+    selected_mission_mode,
+    operating_ugv_plan,
+    departure_times,
+    mission_settings,
+    asset_data,
+    ARRIVAL_TIMES_BY_MODE,
+    MISSION_UGV_PLAN_BY_MODE,
+    DEST_INFO_BY_MODE,
+)
 
 # =========================================================
 # 백엔드 연결 설정
@@ -45,7 +57,6 @@ message_text       = solara.reactive("")
 home_role = solara.reactive("commander")          # commander | operator
 home_role_label = solara.reactive("지휘관")
 home_current_time = solara.reactive("2026.04.10 14:00")
-home_remaining_time = solara.reactive("02:00:34")
 home_mission_notice = solara.reactive("")
 home_unit_label = solara.reactive("")
 home_asset_modes = solara.reactive([])
@@ -62,6 +73,8 @@ login_error     = solara.reactive(False)
 logged_in_user  = solara.reactive("")
 auth_token      = solara.reactive("")    # Access Token
 refresh_token   = solara.reactive("")    # Refresh Token
+_operator_mission_config_timer_lock = threading.Lock()
+_operator_mission_config_timer: threading.Timer | None = None
 
 # ── 팀원 코드: 역할 기반 워크플로우 상태 ─────────────────────
 # (팀원 api_client.py에서 추가된 상태 변수들)
@@ -93,11 +106,70 @@ destination_data = solara.reactive({
     "user3": {"lat": 0.0, "lng": 0.0},
 })
 
+DESTINATION_SLOT_KEY_BY_LABEL = {
+    "도착지1": "user1",
+    "도착지2": "user2",
+    "도착지3": "user3",
+}
+
+
+def _clean_coord_text(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text in ("0", "0.0"):
+        return ""
+    return text
+
+
+def resolve_destination_slot_key_for_unit(user_key: str, mode: str | None = None) -> str | None:
+    current_mode = (
+        mode
+        or selected_mission_mode.value
+        or (active_btn.value if active_btn.value in MISSION_UGV_PLAN_BY_MODE else "")
+        or mission_settings.value.get("mode", "")
+        or "균형"
+    )
+    unit_label = NICKNAMES.get(user_key, user_key)
+    slot_label = DEST_INFO_BY_MODE.get(current_mode, {}).get(unit_label)
+    return DESTINATION_SLOT_KEY_BY_LABEL.get(slot_label)
+
+
+def resolve_destination_coordinate_for_unit(user_key: str, axis: str, mode: str | None = None) -> str:
+    slot_key = resolve_destination_slot_key_for_unit(user_key, mode)
+    if not slot_key:
+        return ""
+    source_key = "lat" if axis == "lat" else "lng"
+    return _clean_coord_text(destination_data.value.get(slot_key, {}).get(source_key))
+
+
+def sync_unit_targets_from_mode_destinations(mode: str | None = None) -> None:
+    current_mode = (
+        mode
+        or selected_mission_mode.value
+        or (active_btn.value if active_btn.value in MISSION_UGV_PLAN_BY_MODE else "")
+        or mission_settings.value.get("mode", "")
+        or "균형"
+    )
+    updated_assets = dict(asset_data.value)
+    changed = False
+    for user_key in ("user1", "user2", "user3"):
+        resolved_lat = resolve_destination_coordinate_for_unit(user_key, "lat", current_mode)
+        resolved_lon = resolve_destination_coordinate_for_unit(user_key, "lon", current_mode)
+        current_unit = dict(updated_assets.get(user_key, {}))
+        if current_unit.get("target_lat", "") != resolved_lat or current_unit.get("target_lon", "") != resolved_lon:
+            current_unit["target_lat"] = resolved_lat
+            current_unit["target_lon"] = resolved_lon
+            updated_assets[user_key] = current_unit
+            changed = True
+    if changed:
+        asset_data.set(updated_assets)
+
 # 지휘관이 작성한 임무 메모
 mission_note = solara.reactive("")
 
 # 작전 설정 전역 상태
-mission_settings = solara.reactive({
+_legacy_mission_settings_unused = solara.reactive({
     "ugv_count": 12,
     "unit_count": 3,
     "all_controller_count": 3,
@@ -137,12 +209,9 @@ zoom_levels = {
 recon_time = solara.reactive("00:30:00")
 
 # ── 상단 제어 버튼 상태 ──────────────────────────────────
-active_btn      = solara.reactive("실행")
-map_selection   = solara.reactive("종합상황도")
+#active_btn      = solara.reactive("")
+map_selection   = solara.reactive("위험도")
 replan_available = solara.reactive(False)
-
-# ── 임무 모드 (균형 | 정찰 | 신속) ── 실행/종료 버튼과 분리 ──────
-mission_mode = solara.reactive("균형")
 
 # ── 상세 패널 상태 ────────────────────────────────────────
 selected_unit_id = solara.reactive(None)
@@ -270,12 +339,13 @@ def refresh_home_summary() -> None:
     home_role.set(data.get("role", "commander"))
     home_role_label.set(data.get("role_label", "지휘관"))
     home_current_time.set(data.get("current_time", ""))
-    remaining_hms = data.get("remaining_time", "02:00:34")
-    sync_remaining_time_text(remaining_hms)
     home_mission_notice.set(data.get("mission_notice") or "")
     home_unit_label.set(data.get("unit_label") or "")
     home_asset_modes.set(data.get("asset_modes", []))
     selected_asset_mode.set(data.get("selected_mode", "balanced"))
+
+    # 기존 UI 변수와도 동기화
+    time_left.set(data.get("remaining_time", "02:00:34"))
 
     # 통제관일 때 좌측 카드 이름도 같이 맞춤
     if data.get("role") == "operator" and data.get("unit_label"):
@@ -344,16 +414,6 @@ def attempt_login():
         workflow_step.set(0)
         message_text.set("")
     else:
-        # 통제관 로그인 — 지휘관이 먼저 준비를 완료해야 함 (팀원 코드)
-        if not commander_data_ready.value:
-            is_logged_in.set(False)
-            login_error.set(True)
-            user_role.set("")
-            logged_in_user.set("")
-            workflow_step.set(0)
-            message_text.set("아직 지휘관이 임무 입력 및 시뮬레이션을 완료하지 않았습니다.")
-            return
-
         logged_in_user.set(u)
         is_logged_in.set(True)
         login_error.set(False)
@@ -382,8 +442,6 @@ def go_home() -> None:
     login_error.set(False)
     logged_in_user.set("")
     active_btn.set("실행")
-    from components.state import stop_mission_timer
-    stop_mission_timer()
     auth_token.set("")
     refresh_token.set("")
     current_page.set("login")
@@ -432,24 +490,20 @@ def _lerp_route(coords: list, progress: float) -> tuple[float, float]:
     return (c1[1] + (c2[1] - c1[1]) * f, c1[0] + (c2[0] - c1[0]) * f)
 
 
-def sync_remaining_time_text(remaining_hms: str, *, force: bool = False) -> None:
-    if timer_running.value and not force:
-        return
-    time_left.set(remaining_hms)
-    home_remaining_time.set(remaining_hms)
-    remaining_time_text_global.set(remaining_hms)
-
-
 def _movement_loop(total_sec: int) -> None:
     import state as _state
+    REAL_SEC_PER_STEP = 3.0   # 실제 3초 = 시뮬 10분
+    SIM_SEC_PER_STEP  = 600   # 10분
 
-    while not _movement_stop.is_set():
-        _time_module.sleep(0.5)
+    remaining = total_sec
+    while not _movement_stop.is_set() and remaining > 0:
+        _time_module.sleep(REAL_SEC_PER_STEP)
         if _movement_stop.is_set():
             break
-        remaining = max(0, timer_remaining_secs.value)
+        remaining = max(0, remaining - SIM_SEC_PER_STEP)
+        time_left.set(_fmt_hms(remaining))
 
-        progress = 1.0 if total_sec <= 0 else 1.0 - (remaining / total_sec)
+        progress = 1.0 - (remaining / total_sec)
         num_ugvs = max(1, int(ratio_x.value))
         new_positions = []
 
@@ -502,10 +556,34 @@ def _stop_ugv_movement() -> None:
 
 def set_active_button(name: str) -> None:
     active_btn.set(name)
+
+    if name in MISSION_UGV_PLAN_BY_MODE:
+        depart_times = {
+            "user1": "03:00:00",
+            "user2": "03:00:00",
+            "user3": "03:00:00",
+        }
+        arrive_times = dict(ARRIVAL_TIMES_BY_MODE.get(name, {}))
+
+        selected_mission_mode.set(name)
+        operating_ugv_plan.set(dict(MISSION_UGV_PLAN_BY_MODE[name]))
+        departure_times.set(dict(depart_times))
+        mission_settings.set({
+            **mission_settings.value,
+            "mode": name,
+            "depart_times": depart_times,
+            "arrive_times": arrive_times,
+        })
+        sync_unit_targets_from_mode_destinations(name)
+        if user_role.value == "commander" and auth_token.value:
+            schedule_operator_mission_config_post(0.2)
+        return
+
     if name == "실행":
         _start_ugv_movement()
         if active_run_id.value:
             _send_command("resume")
+
     elif name == "종료":
         _stop_ugv_movement()
         if active_run_id.value:
@@ -649,8 +727,7 @@ def confirm_route() -> None:
 
         # ETA 기반으로 남은 시간 설정
         eta_min = route.get("eta_min", 60)
-        eta_hms = f"00:{eta_min:02d}:00"
-        sync_remaining_time_text(eta_hms)
+        time_left.set(f"00:{eta_min:02d}:00")
 
         # UGV를 출발지에 배치 (progress=0)
         num_ugvs = max(1, int(input_ugv_count.value))
@@ -766,8 +843,7 @@ def refresh_dashboard(run_id: int) -> None:
             if d.get("status_label"):
                 status.set(d["status_label"])
             if d.get("remaining_time_hms"):
-                remaining_hms = d["remaining_time_hms"]
-                sync_remaining_time_text(remaining_hms)
+                time_left.set(d["remaining_time_hms"])
             if d.get("aoi_remaining_hms"):
                 patrol_area.set(d["aoi_remaining_hms"])
     except Exception:
@@ -808,44 +884,98 @@ def refresh_dashboard(run_id: int) -> None:
 
 # ── 통제관 브리핑 API ────────────────────────────────────────────
 
+def schedule_operator_mission_config_post(delay: float = 0.8) -> None:
+    """입력 중 연속 브리핑 저장 요청을 하나로 묶는다."""
+    global _operator_mission_config_timer
+
+    def _fire():
+        global _operator_mission_config_timer
+        try:
+            post_operator_mission_config()
+        finally:
+            with _operator_mission_config_timer_lock:
+                _operator_mission_config_timer = None
+
+    with _operator_mission_config_timer_lock:
+        if _operator_mission_config_timer is not None:
+            _operator_mission_config_timer.cancel()
+        _operator_mission_config_timer = threading.Timer(delay, _fire)
+        _operator_mission_config_timer.daemon = True
+        _operator_mission_config_timer.start()
+
+
 def post_operator_mission_config() -> bool:
     """
     지휘관이 확정한 임무 설정을 백엔드에 저장.
     CommanderInputPage.handle_submit()에서 호출.
     실패 시 False 반환 (프론트 상태는 이미 업데이트된 상태).
     """
-    from components.pages import asset_data  # 지연 임포트 (순환 참조 방지)
-
-    _depart_map = mission_settings.value.get("depart_times", {})
-    _arrive_map = mission_settings.value.get("arrive_times", {})
+    current_mode = (
+        selected_mission_mode.value
+        or (active_btn.value if active_btn.value in MISSION_UGV_PLAN_BY_MODE else "")
+        or mission_settings.value.get("mode", "")
+        or "균형"
+    )
+    _depart_map = mission_settings.value.get("depart_times", {}) or {}
+    _arrive_map = mission_settings.value.get("arrive_times", {}) or {}
+    _mode_arrive_map = ARRIVAL_TIMES_BY_MODE.get(current_mode, {})
     recon_times = mission_settings.value.get("recon_times", {})
     base = asset_data.value.get("base", {})
+
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            if value is None or value == "":
+                return default
+            return int(value)
+        except Exception:
+            return default
+
+    def _clean_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
     units: dict[str, dict] = {}
     for ukey in ("user1", "user2", "user3"):
         ud = asset_data.value.get(ukey, {})
         kpi = unit_kpi_data.value.get(ukey, {"success": 0, "risk": 0})
+        operating_count = operating_ugv_plan.value.get(ukey)
+        if operating_count in (None, "", 0, "0"):
+            operating_count = MISSION_UGV_PLAN_BY_MODE.get(current_mode, {}).get(
+                ukey,
+                _safe_int(ud.get("available_ugv", 5), 5),
+            )
+        target_lat = resolve_destination_coordinate_for_unit(ukey, "lat", current_mode) or _clean_text(ud.get("target_lat"))
+        target_lon = resolve_destination_coordinate_for_unit(ukey, "lon", current_mode) or _clean_text(ud.get("target_lon"))
+        if target_lat in ("0", "0.0"):
+            target_lat = ""
+        if target_lon in ("0", "0.0"):
+            target_lon = ""
+        depart_time = _clean_text(_depart_map.get(ukey) or departure_times.value.get(ukey) or "03:00:00")
+        if not depart_time:
+            depart_time = "03:00:00"
         units[ukey] = {
-            "controllers":   int(ud.get("controllers", 1)),
-            "total_ugv":     int(ud.get("total_ugv", 5)),
-            "lost_ugv":      int(ud.get("lost_ugv", 0)),
-            "available_ugv": int(ud.get("available_ugv", 5)),
-            "target_lat":    str(ud.get("target_lat", "")),
-            "target_lon":    str(ud.get("target_lon", "")),
-            "depart_time":   _depart_map.get(ukey, "-"),
-            "arrive_time":   _arrive_map.get(ukey, "-"),
+            "controllers":   _safe_int(ud.get("controllers", 1), 1),
+            "total_ugv":     _safe_int(ud.get("total_ugv", 5), 5),
+            "lost_ugv":      _safe_int(ud.get("lost_ugv", 0), 0),
+            "available_ugv": _safe_int(ud.get("available_ugv", 5), 5),
+            "operating_ugv_count": _safe_int(operating_count, 0),
+            "target_lat":    target_lat,
+            "target_lon":    target_lon,
+            "depart_time":   depart_time,
+            "arrive_time":   str(_arrive_map.get(ukey) or _mode_arrive_map.get(ukey) or "-"),
             "recon_time":    str(recon_times.get(ukey, "-")),
-            "success_rate":  int(kpi.get("success", 0)),
-            "risk_rate":     int(kpi.get("risk", 0)),
+            "success_rate":  _safe_int(kpi.get("success", 0), 0),
+            "risk_rate":     _safe_int(kpi.get("risk", 0), 0),
         }
 
     payload = {
-        "mode": mission_mode.value,
+        "mode": current_mode,
         "base_assets": {
-            "total_units":       int(base.get("total_units", 3)),
-            "total_controllers": int(base.get("total_controllers", 3)),
-            "total_ugv":         int(base.get("total_ugv", 13)),
-            "lost_ugv":          int(base.get("lost_ugv", 0)),
+            "total_units":       _safe_int(base.get("total_units", 3), 3),
+            "total_controllers": _safe_int(base.get("total_controllers", 3), 3),
+            "total_ugv":         _safe_int(base.get("total_ugv", 13), 13),
+            "lost_ugv":          _safe_int(base.get("lost_ugv", 0), 0),
         },
         "units": units,
     }
@@ -856,25 +986,109 @@ def post_operator_mission_config() -> bool:
         return False
 
 
-def fetch_operator_briefing(username: str) -> dict | None:
+def fetch_operator_briefing(username: str, retries: int = 4, delay: float = 0.3) -> dict | None:
     """
     통제관이 UserMissionPage에서 자신의 임무 브리핑을 조회.
-    성공 시 unit_kpi_data를 갱신하여 지휘관 차트와 동기화.
+    성공 시 unit_kpi_data, operating_ugv_plan, departure_times를 갱신.
     실패 시 None 반환 → 프론트 상태 폴백 사용.
     """
-    try:
-        resp = _http("GET", f"/api/operators/{username}/briefing")
-        if resp.status_code == 200:
-            data = resp.json()
-            # 백엔드 응답에서 KPI를 받아 module-level reactive 갱신
-            unit_assets = data.get("unit_assets", {})
-            s = unit_assets.get("success_rate")
-            r = unit_assets.get("risk_rate")
-            if s is not None and r is not None:
-                updated = dict(unit_kpi_data.value)
-                updated[username] = {"success": int(s), "risk": int(r)}
-                unit_kpi_data.set(updated)
-            return data
-    except Exception:
-        pass
+    attempts = max(1, retries)
+    for attempt in range(attempts):
+        try:
+            resp = _http("GET", f"/api/operators/{username}/briefing")
+            if resp.status_code == 200:
+                data = resp.json()
+                base_assets = data.get("base_assets", {})
+                unit_assets = data.get("unit_assets", {})
+                mission = data.get("mission", {})
+
+                mission_mode = mission.get("mode")
+                if mission_mode:
+                    selected_mission_mode.set(mission_mode)
+                    mission_settings.set({
+                        **mission_settings.value,
+                        "mode": mission_mode,
+                    })
+
+                if base_assets:
+                    updated_assets = dict(asset_data.value)
+                    updated_assets["base"] = {
+                        **updated_assets.get("base", {}),
+                        "total_units": base_assets.get("total_units", updated_assets.get("base", {}).get("total_units", 0)),
+                        "total_controllers": base_assets.get("total_controllers", updated_assets.get("base", {}).get("total_controllers", 0)),
+                        "total_ugv": base_assets.get("total_ugv", updated_assets.get("base", {}).get("total_ugv", 0)),
+                        "lost_ugv": base_assets.get("lost_ugv", updated_assets.get("base", {}).get("lost_ugv", 0)),
+                    }
+                    updated_assets[username] = {
+                        **updated_assets.get(username, {}),
+                        "controllers": unit_assets.get("controllers", updated_assets.get(username, {}).get("controllers", 0)),
+                        "total_ugv": unit_assets.get("total_ugv", updated_assets.get(username, {}).get("total_ugv", 0)),
+                        "lost_ugv": unit_assets.get("lost_ugv", updated_assets.get(username, {}).get("lost_ugv", 0)),
+                        "available_ugv": unit_assets.get("available_ugv", updated_assets.get(username, {}).get("available_ugv", 0)),
+                        "target_lat": unit_assets.get("target_lat", updated_assets.get(username, {}).get("target_lat", "")),
+                        "target_lon": unit_assets.get("target_lon", updated_assets.get(username, {}).get("target_lon", "")),
+                    }
+                    asset_data.set(updated_assets)
+
+                slot_key = resolve_destination_slot_key_for_unit(username, mission_mode or None)
+                slot_lat = _clean_coord_text(unit_assets.get("target_lat"))
+                slot_lon = _clean_coord_text(unit_assets.get("target_lon"))
+                if slot_key and (slot_lat or slot_lon):
+                    updated_destinations = dict(destination_data.value)
+                    updated_destinations[slot_key] = {
+                        **updated_destinations.get(slot_key, {}),
+                        "lat": slot_lat or updated_destinations.get(slot_key, {}).get("lat", ""),
+                        "lng": slot_lon or updated_destinations.get(slot_key, {}).get("lng", ""),
+                    }
+                    destination_data.set(updated_destinations)
+
+                s = unit_assets.get("success_rate")
+                r = unit_assets.get("risk_rate")
+                if s is not None and r is not None:
+                    updated = dict(unit_kpi_data.value)
+                    updated[username] = {"success": int(s), "risk": int(r)}
+                    unit_kpi_data.set(updated)
+
+                ugv_count = mission.get("operating_ugv_count")
+                if ugv_count is not None:
+                    updated_ugv = dict(operating_ugv_plan.value)
+                    updated_ugv[username] = ugv_count
+                    operating_ugv_plan.set(updated_ugv)
+
+                depart_time = mission.get("depart_time")
+                if depart_time and depart_time not in ("-", "", None):
+                    updated_dep = dict(departure_times.value)
+                    updated_dep[username] = depart_time
+                    departure_times.set(updated_dep)
+                    mission_settings.set({
+                        **mission_settings.value,
+                        "depart_times": {
+                            **mission_settings.value.get("depart_times", {}),
+                            username: depart_time,
+                        },
+                    })
+
+                arrive_time = mission.get("arrive_time")
+                if arrive_time and arrive_time not in ("-", "", None):
+                    mission_settings.set({
+                        **mission_settings.value,
+                        "arrive_times": {
+                            **mission_settings.value.get("arrive_times", {}),
+                            username: arrive_time,
+                        },
+                    })
+
+                sync_unit_targets_from_mode_destinations(mission_mode or None)
+
+                return data
+        except Exception:
+            pass
+        if attempt < attempts - 1:
+            time.sleep(delay)
     return None
+
+
+def fetch_all_operator_briefings() -> None:
+    """지휘관 화면에서 전 제대 운용 UGV 수·출발 시각을 백엔드에서 동기화."""
+    for ukey in ("user1", "user2", "user3"):
+        fetch_operator_briefing(ukey)

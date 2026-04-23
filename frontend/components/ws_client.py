@@ -21,12 +21,14 @@ import solara
 import websocket  # websocket-client 라이브러리
 
 import state
-from components.state import remaining_time_text_global, timer_running
 
-BACKEND_WS_URL = os.getenv("BACKEND_WS_URL", "ws://127.0.0.1:8000")
+BACKEND_WS_URL = os.getenv("BACKEND_WS_URL", "ws://localhost:8000")
 
 _ws_app: websocket.WebSocketApp | None = None
 _ws_thread: threading.Thread | None = None
+
+_mission_ws_app: websocket.WebSocketApp | None = None
+_mission_ws_thread: threading.Thread | None = None
 
 
 # ── 메시지 타입별 핸들러 ──────────────────────────────────────────
@@ -56,11 +58,7 @@ def _apply_ws_message(msg: dict) -> None:
         if msg.get("status"):
             _ac.status.set(_STATUS_LABEL.get(msg["status"], msg["status"]))
         if msg.get("remaining_time_hms"):
-            remaining_hms = msg["remaining_time_hms"]
-            if not timer_running.value:
-                _ac.time_left.set(remaining_hms)
-                _ac.home_remaining_time.set(remaining_hms)
-                remaining_time_text_global.set(remaining_hms)
+            _ac.time_left.set(msg["remaining_time_hms"])
         if msg.get("aoi_remaining_hms"):
             _ac.patrol_area.set(msg["aoi_remaining_hms"])
 
@@ -87,6 +85,45 @@ def _apply_ws_message(msg: dict) -> None:
         asset_code = msg.get("asset_code")
         current = [q for q in _ac.queue_data.value if q["id"] != asset_code]
         _ac.queue_data.set(current)
+
+    elif msg_type == "mission_config_updated":
+        config = msg.get("config", {})
+        mode = config.get("mode")
+        units = config.get("units", {})
+        base = config.get("base_assets", {})
+
+        if mode:
+            _ac.selected_mission_mode.set(mode)
+            _ac.active_btn.set(mode)
+
+        updated_ugv = dict(_ac.operating_ugv_plan.value)
+        updated_dep = dict(_ac.departure_times.value)
+        updated_assets = dict(_ac.asset_data.value)
+
+        for ukey, ud in units.items():
+            ugv_count = ud.get("operating_ugv_count")
+            if ugv_count is not None:
+                updated_ugv[ukey] = ugv_count
+            depart = ud.get("depart_time")
+            if depart and depart not in ("-", ""):
+                updated_dep[ukey] = depart
+            unit_asset = dict(updated_assets.get(ukey, {}))
+            for field in ("controllers", "total_ugv", "lost_ugv", "available_ugv",
+                          "target_lat", "target_lon"):
+                if ud.get(field) is not None:
+                    unit_asset[field] = ud[field]
+            updated_assets[ukey] = unit_asset
+
+        if base:
+            base_asset = dict(updated_assets.get("base", {}))
+            for field in ("total_units", "total_controllers", "total_ugv", "lost_ugv"):
+                if base.get(field) is not None:
+                    base_asset[field] = base[field]
+            updated_assets["base"] = base_asset
+
+        _ac.operating_ugv_plan.set(updated_ugv)
+        _ac.departure_times.set(updated_dep)
+        _ac.asset_data.set(updated_assets)
 
     # 최근 50개 메시지 유지 (api_client.ws_messages)
     current_msgs = _ac.ws_messages.value[-49:]
@@ -189,6 +226,35 @@ def stop_live_updates() -> None:
     _ac.ws_connected.set(False)
     _ac.connection_status.set("연결 종료")
     _ac.active_run_id.set(None)
+
+
+def connect_mission(token: str = "") -> None:
+    """임무 설정 전용 /ws/mission 채널에 연결. 통제관 로그인 직후 호출."""
+    global _mission_ws_app, _mission_ws_thread
+    if _mission_ws_app:
+        return
+    url = f"{BACKEND_WS_URL}/ws/mission?token={token}"
+    _mission_ws_app = websocket.WebSocketApp(
+        url,
+        on_message=_on_message,
+        on_open=lambda ws: None,
+        on_close=lambda ws, *a: None,
+        on_error=lambda ws, e: None,
+    )
+    _mission_ws_thread = threading.Thread(
+        target=_mission_ws_app.run_forever,
+        kwargs={"reconnect": 5},
+        daemon=True,
+    )
+    _mission_ws_thread.start()
+
+
+def disconnect_mission() -> None:
+    """임무 설정 WS 연결 종료."""
+    global _mission_ws_app
+    if _mission_ws_app:
+        _mission_ws_app.close()
+        _mission_ws_app = None
 
 
 @solara.component

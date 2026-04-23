@@ -231,7 +231,7 @@ def _resolve_target_coordinate(user_key: str, axis: str) -> str:
 
 ### 현재시간 나타내기
 # 시뮬레이션 기준 시작 시각
-sim_base_time = datetime(2023, 7, 27, 3, 0, 0)
+sim_base_time = datetime(2023, 7, 27, 15, 0, 0)
 # 앱이 시작된 실제 시각 (웹 서버/커널 켜진 시점)
 app_start_ts = time.time()
 # 단순 리렌더 유도용 tick
@@ -941,6 +941,15 @@ def CommanderPage():
             tick.value += 1   # 1초마다 리렌더만 유도
 
     solara.use_thread(update_clock, dependencies=[])
+    
+    # tick을 읽어서 이 컴포넌트가 tick에 의존한다고 알려줌
+    _ = tick.value
+
+    # 여기서부터는 매번 "경과 시간"으로 현재 시뮬레이션 시각 계산
+    elapsed_seconds = int(time.time() - app_start_ts)
+    current_sim_time = sim_base_time + timedelta(seconds=elapsed_seconds)
+    current_time_text = current_sim_time.strftime("%Y.%m.%d %H:%M:%S")
+
 
     def _sync_briefing_on_mount():
         def _call():
@@ -2146,7 +2155,7 @@ def CommanderPage():
                                     with solara.Div(classes=["asset-popup-body"]):
                                         with solara.Div(classes=["asset-tab-col"]):
                                             for tab_name, label in [
-                                                ("부대", "부대"),
+                                                ("부대 기본자산", "부대"),
                                                 ("1제대 기본자산", "1제대"),
                                                 ("2제대 기본자산", "2제대"),
                                                 ("3제대 기본자산", "3제대"),
@@ -2161,7 +2170,7 @@ def CommanderPage():
                                                 )
 
                                         with solara.Div(classes=["asset-tab-content"]):
-                                            if asset_tab == "부대":
+                                            if asset_tab == "부대 기본자산":
                                                 BaseAssetEditor()
                                             elif asset_tab == "1제대 기본자산":
                                                 UnitAssetEditor("user1", "1제대 기본자산")
@@ -2228,11 +2237,10 @@ def UserPage():
 
     run_state, set_run_state = solara.use_state("")
     show_asset_popup, set_show_asset_popup = solara.use_state(False)
-    asset_tab, set_asset_tab = solara.use_state("부대")
+    asset_tab, set_asset_tab = solara.use_state("부대 기본자산")
     toast_count, set_toast_count = solara.use_state(0)
 
     fixed_mission_mode = selected_mission_mode.value if selected_mission_mode.value else "균형"
-    fixed_mission_mode = _resolve_mission_mode()
 
     MISSION_KPI_DATA = {
         "균형": {
@@ -2273,6 +2281,7 @@ def UserPage():
             tick.value += 1
 
     solara.use_thread(update_clock, dependencies=[])
+    _ = tick.value
 
     def _load_briefing_on_mount():
         if auth_token.value:
@@ -3046,7 +3055,7 @@ def UserPage():
                         "display": "flex",
                         "flex-direction": "column",
                     }):
-                        GridView(current_user=current_user, mode_override=fixed_mission_mode)
+                        GridView(current_user=current_user)
 
                     # 통제관( user1/2/3 )일 때만 센터 맵 하단에 표시
                     # if current_user in ["user1", "user2", "user3"]:
@@ -3172,7 +3181,7 @@ def UserPage():
                                     with solara.Div(classes=["asset-popup-body"]):
                                         with solara.Div(classes=["asset-tab-col"]):
                                             for tab_name, label in [
-                                                ("부대", "부대"),
+                                                ("부대 기본자산", "부대"),
                                                 (f"{my_unit_label} 기본자산", my_unit_label),
                                             ]:
                                                 solara.Button(
@@ -3185,7 +3194,7 @@ def UserPage():
                                                 )
 
                                         with solara.Div(classes=["asset-tab-content"]):
-                                            if asset_tab == "부대":
+                                            if asset_tab == "부대 기본자산":
                                                 BaseAssetEditor()
                                             else:
                                                 UnitAssetEditor(current_user, f"{my_unit_label} 기본자산")
@@ -3508,7 +3517,7 @@ def CommanderInputPage():
                                     "",
                                     value=lat_v,
                                     on_value=lambda v, user_key=user_key: set_field(user_key, "lat", v),
-                                    continuous_update=False,
+                                    #continuous_update=True,
                                 )
                             with solara.Div(classes=["commander-field-row"]):
                                 solara.HTML(tag="div", unsafe_innerHTML="<div class='commander-field-label-inline'>경도</div>")
@@ -3516,7 +3525,7 @@ def CommanderInputPage():
                                     "",
                                     value=lng_v,
                                     on_value=lambda v, user_key=user_key: set_field(user_key, "lng", v),
-                                    continuous_update=False,
+                                    #continuous_update=True,
                                 )
                             solara.Button(
                                 f"{title.replace(' 입력', '')} 표시",
@@ -3566,14 +3575,11 @@ def LoadingPage():
         if rid:
             ws_client.start_live_updates(rid)
             
-    @solara.lab.use_task(dependencies=[workflow_step.value, active_run_id.value])
-    async def auto_redirect():
-        if workflow_step.value != 1:
-            return
-        await asyncio.sleep(2)
-        if workflow_step.value != 1:
-            return
+    def auto_redirect():
+        time.sleep(2)
         go_to_commander_page()
+
+    solara.use_thread(auto_redirect, dependencies=[])    
 
     solara.Style("""
         html, body, #app, .v-application, .v-application__wrap,

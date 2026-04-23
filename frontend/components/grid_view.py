@@ -1,13 +1,27 @@
-﻿import solara
+import solara
 import solara.lab
+import time
 import asyncio
-import os
+
+from services.api_client import (
+    BACKEND_HTTP_BASE,
+    map_selection,
+    set_map_selection,
+    ratio_x,
+    UGV_ICONS,
+    replan_available,
+    request_replan,
+)
 
 from components.state import (
     timer_running,
     timer_end_ts,
     remaining_time_text_global,
     timer_remaining_secs,
+    video_should_play,
+    active_btn,
+    ARRIVAL_TIMES_BY_MODE,
+    departure_times,
     selected_mission_mode,
     mission_toast_count,
     mission_toast_message,
@@ -15,44 +29,28 @@ from components.state import (
 from components.mission_actions import deliver_mission
 
 
-_MAP_HTML_CACHE: dict[str, str] = {}
-
-
-def _load_static_map_html(filename: str) -> str:
-    cached = _MAP_HTML_CACHE.get(filename)
-    if cached is not None:
-        return cached
-
-    html_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..",
-        "static",
-        filename,
-    )
-    try:
-        with open(html_path, "r", encoding="utf-8") as file:
-            cached = file.read()
-    except Exception:
-        cached = """
-        <body style='margin:0;background:#0f1726;color:#94a3b8;display:flex;align-items:center;justify-content:center;height:100vh;'>
-            파일 로딩 실패
-        </body>
-        """
-    _MAP_HTML_CACHE[filename] = cached
-    return cached
-
-
 @solara.component
-def GridView(current_user="admin", mode_override=None):
+def GridView(current_user="admin"):
     #current_user = logged_in_user.value
+
+    is_active = solara.use_reactive(False)
+    last_toggle_time = solara.use_reactive(time.time())
+
+    current_time_text = solara.use_reactive(time.strftime("%Y.%m.%d %H:%M"))
+    remaining_display = solara.use_reactive(remaining_time_text_global.value)
+
+    backend_alive = solara.use_reactive(True)
+    sim_available = solara.use_reactive(False)
+    video_available = solara.use_reactive(False)
 
     @solara.lab.use_task
     async def clock_loop():
         while True:
             if timer_running.value and timer_end_ts.value is not None:
-                secs = timer_remaining_secs.value - 1200
+                secs = timer_remaining_secs.value - 600
                 if secs <= 0:
                     remaining_time_text_global.value = "00:00:00"
+                    remaining_display.value = "00:00:00"
                     timer_running.value = False
                     timer_end_ts.value = None
                     timer_remaining_secs.value = 0
@@ -62,8 +60,55 @@ def GridView(current_user="admin", mode_override=None):
                     m = (secs % 3600) // 60
                     txt = f"{h:02d}:{m:02d}:00"
                     remaining_time_text_global.value = txt
+                    remaining_display.value = txt
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
+
+    @solara.lab.use_task
+    async def health_check_loop():
+        import requests as _hreq
+
+        def _check():
+            try:
+                _hreq.get(f"{BACKEND_HTTP_BASE}/health", timeout=2)
+                alive = True
+            except Exception:
+                alive = False
+
+            sim = False
+            video = False
+
+            if alive:
+                try:
+                    r = _hreq.get(
+                        f"{BACKEND_HTTP_BASE}/api/map/video/status", timeout=2
+                    ).json()
+                    video = r.get("available", False)
+                except Exception:
+                    video = False
+
+                try:
+                    r = _hreq.get(
+                        f"{BACKEND_HTTP_BASE}/api/map/sim/status", timeout=2
+                    ).json()
+                    sim = r.get("available", False)
+                except Exception:
+                    sim = False
+
+            return alive, sim, video
+
+        while True:
+            _alive, _sim, _video = await asyncio.to_thread(_check)
+            backend_alive.value = _alive
+            sim_available.value = _sim
+            video_available.value = _video
+            await asyncio.sleep(5)
+
+    def handle_replan_click():
+        if is_active.value:
+            request_replan()
+            is_active.value = False
+            last_toggle_time.value = time.time()
 
     def handle_mission_delivery():
         deliver_mission()
@@ -248,15 +293,7 @@ def GridView(current_user="admin", mode_override=None):
                 "신속": "animated_gar_overlay_with_paths_persistent_alerts_rush.html",
             }
 
-            selected_mode = (
-                mode_override
-                if mode_override in mode_html_map
-                else (
-                    selected_mission_mode.value
-                    if selected_mission_mode.value in mode_html_map
-                    else None
-                )
-            )
+            selected_mode = selected_mission_mode.value or "균형"
             selected_html_file = mode_html_map.get(selected_mode)
 
             if not selected_html_file:
@@ -283,19 +320,17 @@ def GridView(current_user="admin", mode_override=None):
                     """,
                 )
             else:
-                _local_html = _load_static_map_html(selected_html_file)
                 _html_path = os.path.join(
                     os.path.dirname(os.path.abspath(__file__)),
                     "..", "static",
                     selected_html_file
                 )
 
-                if not _local_html:
-                    try:
-                        with open(_html_path, "r", encoding="utf-8") as f:
-                            _local_html = f.read()
-                    except Exception:
-                        _local_html = """
+                try:
+                    with open(_html_path, "r", encoding="utf-8") as f:
+                        _local_html = f.read()
+                except Exception:
+                    _local_html = """
                     <body style='margin:0;background:#0f1726;color:#94a3b8;display:flex;align-items:center;justify-content:center;height:100vh;'>
                         파일 로딩 실패
                     </body>
@@ -328,7 +363,7 @@ def GridView(current_user="admin", mode_override=None):
                             tag="div",
                             unsafe_innerHTML=(
                                 '<svg width="18" height="22" viewBox="0 0 24 24" fill="none">'
-                                '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#52c41a"/>'
+                                '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#3b82f6"/>'
                                 '<circle cx="12" cy="9" r="3" fill="white"/></svg>'
                             ),
                         )
@@ -339,7 +374,7 @@ def GridView(current_user="admin", mode_override=None):
                             tag="div",
                             unsafe_innerHTML=(
                                 '<svg width="18" height="22" viewBox="0 0 24 24" fill="none">'
-                                '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#3b82f6"/>'
+                                '<path d="M12 2C8.13 2 5 5.13 5 9C5 14.25 12 22 12 22C12 22 19 14.25 19 9C19 5.13 15.87 2 12 2Z" fill="#52c41a"/>'
                                 '<circle cx="12" cy="9" r="3" fill="white"/></svg>'
                             ),
                         )
@@ -370,4 +405,3 @@ def GridView(current_user="admin", mode_override=None):
                         on_click=button_handler,
                         classes=["mission-delivery-btn"]
                     )
-

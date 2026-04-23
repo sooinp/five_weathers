@@ -1,6 +1,6 @@
-# 파이브웨더즈 -기상/환경 위험도 기반 전술 의사결정 지원 시스템-
+# 파이브웨더즈 UGV 전술 지원 시스템
 
-정찰 UGV 운용에 대한 준실시간 의사결정 지원 대시보드.  
+전술 UGV 실시간 의사결정 지원 대시보드.  
 FastAPI 백엔드 + Solara 프론트엔드 구성.
 
 ---
@@ -45,29 +45,18 @@ claude/
 
 ```bash
 cd backend
-copy .env.example .env          # Windows
-# cp .env.example .env          # Mac/Linux
-```
 
-`.env` 파일을 열어서 아래 항목 수정:
-
-| 변수명 | 설명 | 예시 |
-|--------|------|------|
-| `DATABASE_URL` | Docker DB 연결 주소 | `postgresql+asyncpg://postgres:password@db:5432/hanhwa` |
-| `JWT_SECRET_KEY` | JWT 서명 키 (아무 긴 문자열) | `supersecretkey1234567890abcdef12` |
-| `ADMIN_USERNAME` | 초기 관리자 아이디 | `admin` |
-| `ADMIN_PASSWORD` | 초기 관리자 비밀번호 | `admin` |
-
-> `DATABASE_URL`의 호스트는 `localhost`가 아닌 `db`로 설정해야 합니다 (Docker 내부 네트워크).
-
-```bash
 # 가상환경 생성 및 패키지 설치
 python -m venv .venv
 .venv\Scripts\activate          # Windows
 # source .venv/bin/activate     # Mac/Linux
 
-pip install -r requirements.txt    ## 한 번 다운로드 하면 재실행 필요 X
-pip install "uvicorn==0.29.0"   # solara 호환 버전 고정 ## 한 번 다운로드 하면 재실행 필요 X
+pip install -r requirements.txt
+
+# 환경변수 설정
+copy .env.example .env          # Windows
+# cp .env.example .env          # Mac/Linux
+# .env 파일 열어서 실제 값 입력
 
 # 서버 실행
 uvicorn app.main:app --reload
@@ -76,39 +65,14 @@ uvicorn app.main:app --reload
 백엔드 주소: http://localhost:8000  
 API 문서: http://localhost:8000/docs
 
----
-
-### 2. 백엔드 + DB (Docker)
-
-Docker Desktop을 실행한 뒤:
-
-```bash
-cd backend
-docker compose up -d --build
-```
-
-정상 실행 확인:
-```bash
-docker compose ps
-# hanhwa_db, hanhwa_backend 모두 running 상태여야 함
-```
-
-백엔드 주소: http://localhost:8000  
-API 문서: http://localhost:8000/docs
-
----
-
-### 3. 프론트엔드
+### 2. 프론트엔드
 
 ```bash
 cd frontend
 
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Mac/Linux
-
-pip install -r requirements.txt    ## 한 번 다운로드 하면 재실행 필요 X
-pip install "uvicorn==0.29.0"   # solara 호환 버전 고정 ## 한 번 다운로드 하면 재실행 필요 X
+.venv\Scripts\activate
+pip install solara starlette==0.45.3 ipyleaflet ipywidgets websocket-client
 
 solara run app.py
 ```
@@ -136,13 +100,8 @@ solara run app.py
 
 ```bash
 cd backend
-
-# 직접 실행 환경:
 .venv\Scripts\activate
 python create_admin.py --username user1 --password user1
-
-# Docker 환경:
-docker compose exec backend python create_admin.py --username admin --password admin
 ```
 
 ---

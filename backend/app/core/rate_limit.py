@@ -19,10 +19,29 @@ from collections import defaultdict
 from threading import Lock
 
 from fastapi import HTTPException, Request, status
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 logger = logging.getLogger(__name__)
+
+try:
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+except ModuleNotFoundError as exc:
+    logger.warning("slowapi is unavailable, disabling request rate limiting: %s", exc)
+
+    def get_remote_address(request: Request) -> str:
+        if request.client and request.client.host:
+            return request.client.host
+        return "unknown"
+
+    class Limiter:  # type: ignore[override]
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
 
 # ── slowapi 전역 limiter ──────────────────────────────────
 limiter = Limiter(key_func=get_remote_address)

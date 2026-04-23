@@ -80,6 +80,7 @@ def LtwrMapPanel():
                         tag="iframe",
                         attributes={
                             "src": iframe_src,
+                            "loading": "lazy",
                             "width": "100%",
                             "height": "200",
                             "frameborder": "0",

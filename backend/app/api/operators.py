@@ -10,14 +10,17 @@ backend/app/api/operators.py
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import CurrentUser as _CurrentUserDep
+from app.core.websocket_manager import mission_ws_manager
 
 router = APIRouter(tags=["operators"])
+logger = logging.getLogger(__name__)
 
 CurrentUser = _CurrentUserDep
 
@@ -41,6 +44,7 @@ class UnitAssetIn(BaseModel):
     total_ugv: int = 5
     lost_ugv: int = 0
     available_ugv: int = 5
+    operating_ugv_count: int = 0
     target_lat: str = ""
     target_lon: str = ""
     depart_time: str = "-"
@@ -61,6 +65,7 @@ class UnitAssetOut(BaseModel):
     total_ugv: int
     lost_ugv: int
     available_ugv: int
+    operating_ugv_count: int
     target_lat: str
     target_lon: str
     depart_time: str
@@ -73,6 +78,7 @@ class UnitAssetOut(BaseModel):
 class MissionInfoOut(BaseModel):
     mode: str
     available_ugv: int
+    operating_ugv_count: int
     depart_time: str
     arrive_time: str
     recon_time: str
@@ -102,6 +108,16 @@ async def set_mission_config(body: MissionConfigIn, current_user: CurrentUser):
 
     global _mission_config
     _mission_config = body.model_dump()
+    logger.info(
+        "Mission config saved by %s mode=%s units=%s",
+        current_user.sub,
+        _mission_config.get("mode"),
+        sorted((_mission_config.get("units") or {}).keys()),
+    )
+    await mission_ws_manager.broadcast(0, {
+        "type": "mission_config_updated",
+        "config": _mission_config,
+    })
     return {"ok": True, "message": "임무 설정이 저장되었습니다."}
 
 
@@ -137,15 +153,29 @@ async def get_operator_briefing(username: str, current_user: CurrentUser):
         )
 
     base_raw = _mission_config.get("base_assets", {})
+    normalized_unit_raw = dict(unit_raw)
+    normalized_unit_raw.setdefault(
+        "operating_ugv_count",
+        unit_raw.get("available_ugv", 0),
+    )
+    logger.info(
+        "Operator briefing served username=%s requested_by=%s",
+        username,
+        current_user.sub,
+    )
 
     return OperatorBriefingOut(
         username=username,
         unit_label=unit_label,
         base_assets=BaseAssetIn(**base_raw),
-        unit_assets=UnitAssetOut(**unit_raw),
+        unit_assets=UnitAssetOut(**normalized_unit_raw),
         mission=MissionInfoOut(
             mode=_mission_config.get("mode", "균형"),
             available_ugv=unit_raw.get("available_ugv", 0),
+            operating_ugv_count=unit_raw.get(
+                "operating_ugv_count",
+                unit_raw.get("available_ugv", 0),
+            ),
             depart_time=unit_raw.get("depart_time", "-"),
             arrive_time=unit_raw.get("arrive_time", "-"),
             recon_time=unit_raw.get("recon_time", "-"),

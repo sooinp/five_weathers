@@ -73,8 +73,6 @@ def Page():
 
     # 통제관 흐름
     if role == "controller":
-        if not commander_data_ready.value:
-            return LoginPage()
         if step == 0:
             return UserMissionPage()
         else:
